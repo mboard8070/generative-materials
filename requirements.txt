@@ -1,0 +1,30 @@
+# Core ML
+torch>=2.0.0
+torchvision
+diffusers>=0.25.0
+transformers>=4.36.0
+accelerate>=0.25.0
+safetensors
+
+# Image processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+scipy
+
+# Training
+datasets>=2.14.0
+peft>=0.7.0  # LoRA fine-tuning
+bitsandbytes>=0.41.0  # Quantization
+
+# Web UI
+gradio>=4.0.0
+
+# Utilities
+tqdm
+requests
+python-dotenv
+huggingface_hub
+
+# Optional: seamless tiling
+# seamless-tiles  # Custom library TBD
