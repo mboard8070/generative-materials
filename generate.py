@@ -2,22 +2,23 @@
 """
 Text-to-Material Generator
 
-Generate PBR material maps from text descriptions.
+Generate PBR material maps from text descriptions using Flux.1-dev.
 """
 
 import argparse
 import torch
 from pathlib import Path
 from PIL import Image
-from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
+from diffusers import FluxPipeline
 
-# Default model - can swap for fine-tuned version later
-MODEL_ID = "stabilityai/stable-diffusion-2-1"
+# Use local Flux.1-dev
+MODEL_ID = "black-forest-labs/FLUX.1-dev"
+
 
 def make_seamless(image: Image.Image) -> Image.Image:
     """
     Make an image tile seamlessly using mirror blending.
-    Simple approach - can improve later.
+    Simple approach - can improve later with latent-space tiling.
     """
     import numpy as np
     
@@ -25,17 +26,21 @@ def make_seamless(image: Image.Image) -> Image.Image:
     h, w = img.shape[:2]
     blend_size = w // 8
     
-    # Create seamless version by blending edges
-    # This is a basic approach - Phase 2 will do this in latent space
     result = img.copy()
     
     # Horizontal blend
     for i in range(blend_size):
         alpha = i / blend_size
-        result[:, i] = (1 - alpha) * img[:, w - blend_size + i] + alpha * img[:, i]
-        result[:, w - 1 - i] = (1 - alpha) * img[:, blend_size - 1 - i] + alpha * img[:, w - 1 - i]
+        result[:, i] = ((1 - alpha) * img[:, w - blend_size + i] + alpha * img[:, i]).astype(np.uint8)
+        result[:, w - 1 - i] = ((1 - alpha) * img[:, blend_size - 1 - i] + alpha * img[:, w - 1 - i]).astype(np.uint8)
     
-    return Image.fromarray(result.astype(np.uint8))
+    # Vertical blend
+    for i in range(blend_size):
+        alpha = i / blend_size
+        result[i, :] = ((1 - alpha) * result[h - blend_size + i, :] + alpha * result[i, :]).astype(np.uint8)
+        result[h - 1 - i, :] = ((1 - alpha) * result[blend_size - 1 - i, :] + alpha * result[h - 1 - i, :]).astype(np.uint8)
+    
+    return Image.fromarray(result)
 
 
 def generate_material(
@@ -44,41 +49,41 @@ def generate_material(
     resolution: int = 512,
     seamless: bool = True,
     seed: int = None,
+    steps: int = 28,
 ):
     """
-    Generate a PBR material from a text prompt.
+    Generate a PBR material from a text prompt using Flux.1-dev.
     
-    Phase 1: Just generates albedo map
+    Phase 1: Generates albedo/diffuse map
     Phase 2: Will generate full PBR set
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
     
-    print(f"Loading model on {device}...")
-    pipe = StableDiffusionPipeline.from_pretrained(
+    print(f"Loading Flux.1-dev on {device}...")
+    pipe = FluxPipeline.from_pretrained(
         MODEL_ID,
-        torch_dtype=dtype,
-        safety_checker=None,
+        torch_dtype=torch.bfloat16,
     )
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-    pipe = pipe.to(device)
+    pipe.enable_model_cpu_offload()  # Saves VRAM
     
     # Enhance prompt for material generation
-    material_prompt = f"seamless tileable texture of {prompt}, PBR material, game texture, 4k, highly detailed, top down view, flat lighting"
-    negative_prompt = "text, watermark, signature, frame, border, 3d render, perspective, objects, items"
+    material_prompt = f"seamless tileable PBR texture of {prompt}, game texture, photorealistic material, top-down flat view, even lighting, no shadows, highly detailed surface, 4k quality"
     
-    generator = torch.Generator(device=device)
+    generator = torch.Generator(device="cpu")
     if seed is not None:
         generator.manual_seed(seed)
+    else:
+        generator.manual_seed(torch.randint(0, 2**32, (1,)).item())
     
     print(f"Generating: {prompt}")
+    print(f"Resolution: {resolution}x{resolution}, Steps: {steps}")
+    
     image = pipe(
         prompt=material_prompt,
-        negative_prompt=negative_prompt,
         width=resolution,
         height=resolution,
-        num_inference_steps=30,
-        guidance_scale=7.5,
+        num_inference_steps=steps,
+        guidance_scale=3.5,
         generator=generator,
     ).images[0]
     
@@ -98,25 +103,28 @@ def generate_material(
     image.save(albedo_path)
     print(f"Saved: {albedo_path}")
     
-    # Phase 2: Generate other maps here
-    # normal_map = generate_normal(image)
-    # roughness_map = generate_roughness(prompt, image)
-    # etc.
+    # Create tiled preview
+    tiled = Image.new('RGB', (resolution * 2, resolution * 2))
+    for x in range(2):
+        for y in range(2):
+            tiled.paste(image, (x * resolution, y * resolution))
+    
+    tiled_path = output_dir / f"{clean_name}_tiled.png"
+    tiled.save(tiled_path)
+    print(f"Saved tiled preview: {tiled_path}")
     
     return {
         "albedo": albedo_path,
-        # "normal": normal_path,
-        # "roughness": roughness_path,
-        # "metallic": metallic_path,
-        # "height": height_path,
+        "tiled": tiled_path,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate PBR materials from text")
+    parser = argparse.ArgumentParser(description="Generate PBR materials from text using Flux.1")
     parser.add_argument("--prompt", "-p", type=str, required=True, help="Material description")
     parser.add_argument("--output", "-o", type=str, default="outputs", help="Output directory")
-    parser.add_argument("--resolution", "-r", type=int, default=512, choices=[512, 1024, 2048], help="Output resolution")
+    parser.add_argument("--resolution", "-r", type=int, default=512, choices=[512, 768, 1024], help="Output resolution")
+    parser.add_argument("--steps", type=int, default=28, help="Inference steps (default: 28)")
     parser.add_argument("--no-seamless", action="store_true", help="Disable seamless tiling")
     parser.add_argument("--seed", "-s", type=int, default=None, help="Random seed for reproducibility")
     
@@ -128,6 +136,7 @@ def main():
         resolution=args.resolution,
         seamless=not args.no_seamless,
         seed=args.seed,
+        steps=args.steps,
     )
     
     print("\nGenerated material maps:")
