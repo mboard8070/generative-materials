@@ -6,6 +6,20 @@ Generate PBR material maps from text descriptions using Flux.1-dev.
 Supports both direct prompts and surface property sliders.
 """
 
+import os
+import sys
+
+# Block Apex fused norms - they don't support bf16
+class _ApexBlocker:
+    def find_module(self, name, path=None):
+        if name.startswith("apex"):
+            return self
+        return None
+    def load_module(self, name):
+        raise ImportError(f"Blocked {name}")
+
+sys.meta_path.insert(0, _ApexBlocker())
+
 import argparse
 import torch
 from pathlib import Path
@@ -18,27 +32,61 @@ MODEL_ID = "black-forest-labs/FLUX.1-dev"
 
 
 def make_seamless(image: Image.Image) -> Image.Image:
-    """Make an image tile seamlessly using edge blending."""
+    """Make an image tile seamlessly using offset + cross-blend method."""
     import numpy as np
+    from scipy.ndimage import gaussian_filter
     
-    img = np.array(image)
+    img = np.array(image, dtype=np.float32)
     h, w = img.shape[:2]
-    blend_size = w // 8
-    result = img.copy()
     
-    # Horizontal blend
-    for i in range(blend_size):
-        alpha = i / blend_size
-        result[:, i] = ((1 - alpha) * img[:, w - blend_size + i] + alpha * img[:, i]).astype(np.uint8)
-        result[:, w - 1 - i] = ((1 - alpha) * img[:, blend_size - 1 - i] + alpha * img[:, w - 1 - i]).astype(np.uint8)
+    # Step 1: Offset image by half in both directions (wraps edges to center)
+    offset_img = np.roll(np.roll(img, h // 2, axis=0), w // 2, axis=1)
     
-    # Vertical blend
-    for i in range(blend_size):
-        alpha = i / blend_size
-        result[i, :] = ((1 - alpha) * result[h - blend_size + i, :] + alpha * result[i, :]).astype(np.uint8)
-        result[h - 1 - i, :] = ((1 - alpha) * result[blend_size - 1 - i, :] + alpha * result[h - 1 - i, :]).astype(np.uint8)
+    # Step 2: Create cross-shaped blend mask (blend the center seams)
+    blend_width = w // 4  # Width of blend zone
     
-    return Image.fromarray(result)
+    # Create smooth gradient masks
+    y_mask = np.ones((h, w), dtype=np.float32)
+    x_mask = np.ones((h, w), dtype=np.float32)
+    
+    # Vertical blend zone (horizontal seam)
+    for i in range(blend_width):
+        alpha = i / blend_width
+        # Smooth cosine interpolation
+        alpha = 0.5 - 0.5 * np.cos(alpha * np.pi)
+        y_mask[h // 2 - blend_width // 2 + i, :] = alpha
+        y_mask[h // 2 + blend_width // 2 - i - 1, :] = alpha
+    y_mask[h // 2 - blend_width // 2:h // 2 + blend_width // 2, :] = np.minimum(
+        y_mask[h // 2 - blend_width // 2:h // 2 + blend_width // 2, :],
+        np.linspace(0, 1, blend_width)[:, np.newaxis]
+    )
+    
+    # Horizontal blend zone (vertical seam)  
+    for i in range(blend_width):
+        alpha = i / blend_width
+        alpha = 0.5 - 0.5 * np.cos(alpha * np.pi)
+        x_mask[:, w // 2 - blend_width // 2 + i] = alpha
+        x_mask[:, w // 2 + blend_width // 2 - i - 1] = alpha
+    x_mask[:, w // 2 - blend_width // 2:w // 2 + blend_width // 2] = np.minimum(
+        x_mask[:, w // 2 - blend_width // 2:w // 2 + blend_width // 2],
+        np.linspace(0, 1, blend_width)[np.newaxis, :]
+    )
+    
+    # Combine masks
+    mask = np.minimum(x_mask, y_mask)
+    mask = gaussian_filter(mask, sigma=blend_width // 8)  # Smooth edges
+    
+    # Expand mask to 3 channels
+    mask_3d = mask[:, :, np.newaxis]
+    
+    # Step 3: Blend original (offset) with itself using mask
+    # The trick: blend offset image with original at the center cross
+    result = offset_img * mask_3d + np.roll(np.roll(offset_img, h // 2, axis=0), w // 2, axis=1) * (1 - mask_3d)
+    
+    # Step 4: Offset back
+    result = np.roll(np.roll(result, h // 2, axis=0), w // 2, axis=1)
+    
+    return Image.fromarray(result.astype(np.uint8))
 
 
 def generate_material(
@@ -96,7 +144,7 @@ def generate_material(
         MODEL_ID,
         torch_dtype=torch.bfloat16,
     )
-    pipe.enable_model_cpu_offload()
+    pipe.enable_sequential_cpu_offload()
     
     generator = torch.Generator(device="cpu")
     if seed is not None:
