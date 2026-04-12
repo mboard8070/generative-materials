@@ -8,6 +8,7 @@ interface LayerStackProps {
   onUpdateLayer: (id: string, updates: Partial<Layer>) => void
   onMoveLayer: (id: string, direction: 'up' | 'down') => void
   onDuplicateLayer: (id: string) => void
+  onGenerateLayer: (id: string, prompt: string) => void
   onApply: () => void
   applying: boolean
 }
@@ -19,6 +20,7 @@ export default function LayerStack({
   onUpdateLayer,
   onMoveLayer,
   onDuplicateLayer,
+  onGenerateLayer,
   onApply,
   applying,
 }: LayerStackProps) {
@@ -35,7 +37,7 @@ export default function LayerStack({
             onClick={onApply}
             disabled={layers.length === 0 || applying}
           >
-            {applying ? 'Applying...' : 'Apply to PBR'}
+            {applying ? 'Compositing...' : 'Composite Layers'}
           </button>
         </div>
       </section>
@@ -49,13 +51,15 @@ export default function LayerStack({
             onRemove={onRemoveLayer}
             onMove={onMoveLayer}
             onDuplicate={onDuplicateLayer}
+            onGenerate={onGenerateLayer}
             isFirst={index === 0}
             isLast={index === layers.length - 1}
           />
         ))}
         {layers.length === 0 && (
           <p className="hint" style={{ textAlign: 'center', padding: '1rem' }}>
-            No layers yet. Click "+ Add Layer" to start.
+            No layers yet. Add a layer, enter a material prompt, and generate.
+            <br />Each layer gets its own PBR maps that blend per-channel.
           </p>
         )}
       </div>

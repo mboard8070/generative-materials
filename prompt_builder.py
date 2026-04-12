@@ -206,8 +206,8 @@ def build_prompt(
     # Build the prompt
     material_desc = " ".join(parts)
     
-    prompt = f"seamless tileable PBR texture of {material_desc}, game texture, photorealistic material, top-down flat view, even lighting, no shadows, highly detailed surface, 4k quality"
-    
+    prompt = f"pbr_multimap seamless tileable PBR texture of {material_desc}, game texture, photorealistic material, top-down flat view, even lighting, no shadows, highly detailed surface, 4k quality"
+
     return prompt
 
 

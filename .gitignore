@@ -24,6 +24,13 @@ data/processed/
 
 # Outputs
 outputs/
+api/outputs/
+api/library/
+output/
+
+# Frontend build
+ui/dist/
+ui/node_modules/
 
 # IDE
 .vscode/
