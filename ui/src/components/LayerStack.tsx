@@ -9,6 +9,8 @@ interface LayerStackProps {
   onMoveLayer: (id: string, direction: 'up' | 'down') => void
   onDuplicateLayer: (id: string) => void
   onGenerateLayer: (id: string, prompt: string) => void
+  onPaintLayer: (id: string) => void
+  paintingLayerId: string | null
   onApply: () => void
   applying: boolean
 }
@@ -21,6 +23,8 @@ export default function LayerStack({
   onMoveLayer,
   onDuplicateLayer,
   onGenerateLayer,
+  onPaintLayer,
+  paintingLayerId,
   onApply,
   applying,
 }: LayerStackProps) {
@@ -52,6 +56,8 @@ export default function LayerStack({
             onMove={onMoveLayer}
             onDuplicate={onDuplicateLayer}
             onGenerate={onGenerateLayer}
+            onPaint={onPaintLayer}
+            isPainting={layer.id === paintingLayerId}
             isFirst={index === 0}
             isLast={index === layers.length - 1}
           />

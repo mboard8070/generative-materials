@@ -9,6 +9,8 @@ interface LayerItemProps {
   onMove: (id: string, direction: 'up' | 'down') => void
   onDuplicate: (id: string) => void
   onGenerate: (id: string, prompt: string) => void
+  onPaint: (id: string) => void
+  isPainting: boolean
   isFirst: boolean
   isLast: boolean
 }
@@ -30,6 +32,8 @@ export default function LayerItem({
   onMove,
   onDuplicate,
   onGenerate,
+  onPaint,
+  isPainting,
   isFirst,
   isLast,
 }: LayerItemProps) {
@@ -141,14 +145,27 @@ export default function LayerItem({
                 onChange={(e) => onUpdate(layer.id, { materialPrompt: e.target.value })}
                 style={{ width: '100%', padding: '6px 8px', fontSize: '0.85rem' }}
               />
-              <button
-                className={`generate-btn ${layer.generating ? 'processing' : ''}`}
-                onClick={() => onGenerate(layer.id, layer.materialPrompt)}
-                disabled={layer.generating || !layer.materialPrompt.trim()}
-                style={{ fontSize: '0.8rem', padding: '6px 12px' }}
-              >
-                {layer.generating ? 'Generating...' : 'Generate Layer Material'}
-              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  className={`generate-btn ${layer.generating ? 'processing' : ''}`}
+                  onClick={() => onGenerate(layer.id, layer.materialPrompt)}
+                  disabled={layer.generating || !layer.materialPrompt.trim()}
+                  style={{ fontSize: '0.8rem', padding: '6px 12px', flex: 1 }}
+                >
+                  {layer.generating ? 'Generating...' : 'Generate'}
+                </button>
+                <button
+                  className="generate-btn"
+                  onClick={() => onPaint(layer.id)}
+                  style={{
+                    fontSize: '0.8rem', padding: '6px 12px',
+                    background: isPainting ? '#6366f1' : undefined,
+                    color: isPainting ? 'white' : undefined,
+                  }}
+                >
+                  {isPainting ? 'Painting...' : 'Paint'}
+                </button>
+              </div>
               {hasMaps && (
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                   {PBR_CHANNELS.map(ch => {

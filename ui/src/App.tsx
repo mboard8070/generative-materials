@@ -5,11 +5,12 @@ import { materialPresets, promptModifiers } from './data/materialPresets'
 import { useLayerStack } from './hooks/useLayerStack'
 import { compositePbrLayers } from './lib/compositor'
 import type { PbrMaps } from './types/layers'
+import MapPainter from './components/MapPainter'
 import './App.css'
 
 const API_URL = ''
 
-type Mode = 'generate' | 'image-to-pbr' | 'extract' | 'edit' | 'layers' | 'library'
+type Mode = 'generate' | 'image-to-pbr' | 'extract' | 'edit' | 'layers' | 'paint' | 'library'
 
 interface SavedMaterial {
   id: string
@@ -55,6 +56,10 @@ function App() {
   const [extractPreview, setExtractPreview] = useState<string | null>(null)
   const [extractLabel, setExtractLabel] = useState('')
 
+  // Paint
+  const [paintChannels, setPaintChannels] = useState<('basecolor' | 'normal' | 'roughness' | 'metalness' | 'height' | 'ao' | 'emissive' | 'translucency' | 'subsurface')[]>(['metalness'])
+  const [paintingLayerId, setPaintingLayerId] = useState<string | null>(null)
+
   // Library
   const [libraryItems, setLibraryItems] = useState<SavedMaterial[]>([])
   const [saveName, setSaveName] = useState('')
@@ -72,8 +77,8 @@ function App() {
   const [transmission, setTransmission] = useState(0.0)
   const [thickness, setThickness] = useState(0.0)
   const [subsurfaceColor, setSubsurfaceColor] = useState('#ffffff')
-  const [translucencyMapUrl, _setTranslucencyMapUrl] = useState<string | null>(null)
-  const [subsurfaceMapUrl, _setSubsurfaceMapUrl] = useState<string | null>(null)
+  const [translucencyMapUrl, setTranslucencyMapUrl] = useState<string | null>(null)
+  const [subsurfaceMapUrl, setSubsurfaceMapUrl] = useState<string | null>(null)
 
   // Geometry
   const [geometry, setGeometry] = useState<'sphere' | 'plane' | 'cube' | 'custom'>('sphere')
@@ -134,6 +139,8 @@ function App() {
         if (cancelled) return
         setApiStep('Connecting to server...')
         setApiProgress(0)
+        setPatinaReady(false)
+        setApiReady(false)
       }
       if (!cancelled) setTimeout(poll, 2000)
     }
@@ -230,6 +237,19 @@ function App() {
       updateLayer(layerId, { generating: false })
     }
   }, [updateLayer])
+
+  // Paint onto a layer's map
+  const handleLayerPaint = useCallback((ch: string, dataUrl: string) => {
+    if (!paintingLayerId) return
+    const layer = layers.find(l => l.id === paintingLayerId)
+    if (!layer) return
+    updateLayer(paintingLayerId, {
+      materialMaps: { ...layer.materialMaps, [ch]: dataUrl },
+    })
+  }, [paintingLayerId, layers, updateLayer])
+
+  // Get the currently painting layer
+  const paintingLayer = paintingLayerId ? layers.find(l => l.id === paintingLayerId) : null
 
   // Composite all PBR channels when layers change (debounced)
   const runComposite = useCallback(() => {
@@ -542,6 +562,7 @@ function App() {
             <option value="extract">Extract Material</option>
             <option value="edit" disabled={!textureUrl}>Edit</option>
             <option value="layers">Layers</option>
+            <option value="paint" disabled={!textureUrl}>Paint Maps</option>
             <option value="library">Library</option>
           </select>
 
@@ -684,17 +705,75 @@ function App() {
 
           {/* ---- LAYERS MODE ---- */}
           {mode === 'layers' && (
-            <LayerStack
-              layers={layers}
-              onAddLayer={addLayer}
-              onRemoveLayer={removeLayer}
-              onUpdateLayer={updateLayer}
-              onMoveLayer={moveLayer}
-              onDuplicateLayer={duplicateLayer}
-              onGenerateLayer={handleGenerateLayer}
-              onApply={handleApplyLayers}
-              applying={applyingLayers}
-            />
+            <>
+              <LayerStack
+                layers={layers}
+                onAddLayer={addLayer}
+                onRemoveLayer={removeLayer}
+                onUpdateLayer={updateLayer}
+                onMoveLayer={moveLayer}
+                onDuplicateLayer={duplicateLayer}
+                onGenerateLayer={handleGenerateLayer}
+                onPaintLayer={(id) => setPaintingLayerId(paintingLayerId === id ? null : id)}
+                paintingLayerId={paintingLayerId}
+                onApply={handleApplyLayers}
+                applying={applyingLayers}
+              />
+              {paintingLayer && (
+                <>
+                  <section className="section">
+                    <h2>Paint: {paintingLayer.name}</h2>
+                  </section>
+                  <MapPainter
+                    channels={paintChannels}
+                    sourceUrls={paintingLayer.materialMaps as Record<string, string | null>}
+                    onChannelsChange={setPaintChannels}
+                    onUpdate={handleLayerPaint}
+                    onUpload={handleLayerPaint}
+                  />
+                </>
+              )}
+            </>
+          )}
+
+          {/* ---- PAINT MODE ---- */}
+          {mode === 'paint' && (
+            <>
+              <section className="section">
+                <h2>Paint Base Maps</h2>
+              </section>
+              <MapPainter
+                channels={paintChannels}
+                sourceUrls={{
+                  basecolor: textureUrl, normal: normalMapUrl, roughness: roughnessMapUrl,
+                  metalness: metallicMapUrl, height: heightMapUrl, ao: aoMapUrl,
+                  emissive: emissiveMapUrl, translucency: translucencyMapUrl, subsurface: subsurfaceMapUrl,
+                }}
+                onChannelsChange={setPaintChannels}
+                onUpdate={(ch, dataUrl) => {
+                  if (ch === 'basecolor') setTextureUrl(dataUrl)
+                  else if (ch === 'normal') setNormalMapUrl(dataUrl)
+                  else if (ch === 'roughness') setRoughnessMapUrl(dataUrl)
+                  else if (ch === 'metalness') setMetallicMapUrl(dataUrl)
+                  else if (ch === 'height') setHeightMapUrl(dataUrl)
+                  else if (ch === 'ao') setAoMapUrl(dataUrl)
+                  else if (ch === 'emissive') setEmissiveMapUrl(dataUrl)
+                  else if (ch === 'translucency') setTranslucencyMapUrl(dataUrl)
+                  else if (ch === 'subsurface') setSubsurfaceMapUrl(dataUrl)
+                }}
+                onUpload={(ch, dataUrl) => {
+                  if (ch === 'basecolor') setTextureUrl(dataUrl)
+                  else if (ch === 'normal') setNormalMapUrl(dataUrl)
+                  else if (ch === 'roughness') setRoughnessMapUrl(dataUrl)
+                  else if (ch === 'metalness') setMetallicMapUrl(dataUrl)
+                  else if (ch === 'height') setHeightMapUrl(dataUrl)
+                  else if (ch === 'ao') setAoMapUrl(dataUrl)
+                  else if (ch === 'emissive') setEmissiveMapUrl(dataUrl)
+                  else if (ch === 'translucency') setTranslucencyMapUrl(dataUrl)
+                  else if (ch === 'subsurface') setSubsurfaceMapUrl(dataUrl)
+                }}
+              />
+            </>
           )}
 
           {/* ---- LIBRARY MODE ---- */}
@@ -772,7 +851,7 @@ function App() {
           )}
 
           {/* ---- Shared bottom controls ---- */}
-          {mode !== 'layers' && mode !== 'library' && (
+          {mode !== 'layers' && mode !== 'library' && mode !== 'paint' && (
             <>
               {(mode === 'generate' || mode === 'edit') && (
                 <section className="section">

@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Optional
 import threading
 import time
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -421,7 +424,7 @@ def _download_patina_maps(result: dict, texture_id: str, hx) -> dict:
         url_key, fname_tpl = PATINA_MAP_KEYS[map_type]
         filename = fname_tpl.format(tid=texture_id)
         dest = OUTPUT_DIR / filename
-        with hx.stream("GET", img["url"], follow_redirects=True) as r:
+        with hx.stream("GET", img["url"], follow_redirects=True, timeout=60.0) as r:
             r.raise_for_status()
             with open(dest, "wb") as f:
                 for chunk in r.iter_bytes(8192):
