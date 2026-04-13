@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "surfaced": {
+      "command": "/home/mboard76/nvidia-workbench/text-to-material/venv/bin/python3",
+      "args": ["/home/mboard76/nvidia-workbench/text-to-material/mcp_server.py"],
+      "env": {}
+    }
+  }
+}
