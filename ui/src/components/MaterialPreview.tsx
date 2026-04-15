@@ -101,6 +101,60 @@ function useFlippedNormalMap(
   return flipped
 }
 
+/**
+ * Invert a grayscale texture: value = 255 - value.
+ */
+function useInvertedTexture(
+  source: THREE.Texture | null,
+  invert: boolean,
+): THREE.Texture | null {
+  const [result, setResult] = useState<THREE.Texture | null>(null)
+
+  useEffect(() => {
+    if (!source || !invert) {
+      setResult((prev) => {
+        if (prev && prev !== source) prev.dispose()
+        return source
+      })
+      return
+    }
+
+    const image = source.image as HTMLImageElement | HTMLCanvasElement
+    if (!image) {
+      setResult(source)
+      return
+    }
+
+    const w = image.width || 512
+    const h = image.height || 512
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')!
+    ctx.drawImage(image, 0, 0)
+    const imageData = ctx.getImageData(0, 0, w, h)
+    const data = imageData.data
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = 255 - data[i]
+      data[i + 1] = 255 - data[i + 1]
+      data[i + 2] = 255 - data[i + 2]
+    }
+    ctx.putImageData(imageData, 0, 0)
+
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+    tex.repeat.copy(source.repeat)
+    tex.needsUpdate = true
+
+    setResult((prev) => {
+      if (prev && prev !== source) prev.dispose()
+      return tex
+    })
+  }, [source, invert])
+
+  return result
+}
+
 function useCustomGeometry(url: string | null): THREE.BufferGeometry | null {
   const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null)
   useEffect(() => {
@@ -149,6 +203,9 @@ interface MaterialSphereProps {
   normalFlipG: boolean
   normalFlipB: boolean
   tileRepeat: number
+  ignoreMetallicMap: boolean
+  ignoreRoughnessMap: boolean
+  invertRoughness: boolean
 }
 
 function TexturedSphere({
@@ -176,6 +233,9 @@ function TexturedSphere({
   normalFlipG,
   normalFlipB,
   tileRepeat,
+  ignoreMetallicMap = false,
+  ignoreRoughnessMap = false,
+  invertRoughness = false,
   geometry = 'sphere',
   customMeshUrl = null,
 }: MaterialSphereProps & { geometry?: string; customMeshUrl?: string | null }) {
@@ -202,7 +262,8 @@ function TexturedSphere({
   // Optional PBR maps loaded safely (always same number of hook calls)
   const rawNormalMap = useOptionalTexture(normalMapUrl, tileRepeat)
   const displacementMap = useOptionalTexture(heightMapUrl, tileRepeat)
-  const roughnessMap = useOptionalTexture(roughnessMapUrl, tileRepeat)
+  const rawRoughnessMap = useOptionalTexture(roughnessMapUrl, tileRepeat)
+  const roughnessMap = useInvertedTexture(rawRoughnessMap, invertRoughness)
   const emissiveMap = useOptionalTexture(emissiveMapUrl, tileRepeat)
   const aoMap = useOptionalTexture(aoMapUrl, tileRepeat)
   const metallicMap = useOptionalTexture(metallicMapUrl, tileRepeat)
@@ -219,7 +280,7 @@ function TexturedSphere({
   })
 
   // Force material shader recompile when the set of available maps changes
-  const materialKey = `mat-${!!normalMap}-${!!displacementMap}-${!!roughnessMap}-${!!emissiveMap}-${!!aoMap}-${!!metallicMap}-${!!translucencyMap}-${!!subsurfaceMap}-${tileRepeat}`
+  const materialKey = `mat-${!!normalMap}-${!!displacementMap}-${!!roughnessMap}-${!!emissiveMap}-${!!aoMap}-${!!metallicMap}-${!!translucencyMap}-${!!subsurfaceMap}-${tileRepeat}-${ignoreMetallicMap}-${ignoreRoughnessMap}-${invertRoughness}-${metallicMapUrl?.substring(0, 30) ?? 'none'}`
 
   const normalScaleVec = useMemo(() => new THREE.Vector2(normalScale, normalScale), [normalScale])
   const attenuationColor = useMemo(() => new THREE.Color(subsurfaceColor), [subsurfaceColor])
@@ -233,10 +294,10 @@ function TexturedSphere({
       displacementMap={displacementMap ?? undefined}
       displacementScale={displacementScale}
       displacementBias={-displacementScale * 0.5}
-      roughnessMap={roughnessMap ?? undefined}
+      roughnessMap={ignoreRoughnessMap ? undefined : (roughnessMap ?? undefined)}
       roughness={roughness}
       metalness={metalness}
-      metalnessMap={metallicMap ?? undefined}
+      metalnessMap={ignoreMetallicMap ? undefined : (metallicMap ?? undefined)}
       specularIntensity={specularIntensity}
       specularColor={new THREE.Color(1, 1, 1)}
       aoMap={aoMap ?? undefined}

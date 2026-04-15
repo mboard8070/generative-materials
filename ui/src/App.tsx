@@ -80,6 +80,10 @@ function App() {
   const [translucencyMapUrl, setTranslucencyMapUrl] = useState<string | null>(null)
   const [subsurfaceMapUrl, setSubsurfaceMapUrl] = useState<string | null>(null)
 
+  // Map viewer — when set, shows this map as the albedo on the 3D object
+  const [viewingMap, setViewingMap] = useState<string | null>(null)
+  const [viewingMapLabel, setViewingMapLabel] = useState<string | null>(null)
+
   // Geometry
   const [geometry, setGeometry] = useState<'sphere' | 'plane' | 'cube' | 'custom'>('sphere')
   const [customMeshUrl, setCustomMeshUrl] = useState<string | null>(null)
@@ -155,6 +159,16 @@ function App() {
   const [normalFlipR, setNormalFlipR] = useState(false)
   const [normalFlipG, setNormalFlipG] = useState(false)
   const [normalFlipB, setNormalFlipB] = useState(false)
+
+  // Map override toggles
+  const [ignoreMetallicMap, setIgnoreMetallicMap] = useState(false)
+  const [ignoreRoughnessMap, setIgnoreRoughnessMap] = useState(false)
+  const [invertRoughness, setInvertRoughness] = useState(false)
+
+  // Derived metallic map
+  const [metallicThreshold, setMetallicThreshold] = useState(0.5)
+  const [metallicSoftness, setMetallicSoftness] = useState(0.3)
+  const [metallicDeriveMode, setMetallicDeriveMode] = useState<'warm' | 'cool' | 'luminance' | 'saturation'>('warm')
 
   // Layer stack
   const { layers, addLayer, removeLayer, updateLayer, moveLayer, duplicateLayer, clearLayers } = useLayerStack()
@@ -276,6 +290,76 @@ function App() {
     runComposite()
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
   }, [runComposite])
+
+  // --- Derive metallic map from base color ---
+  const deriveMetallicMap = useCallback((threshold: number, softness: number, mode: string) => {
+    if (!textureUrl) return
+    const img = new Image()
+    img.onerror = () => console.error('Derive metallic: failed to load image')
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = img.width
+      canvas.height = img.height
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(img, 0, 0)
+      let imageData: ImageData
+      try {
+        imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      } catch (e) {
+        console.error('getImageData failed:', e)
+        return
+      }
+      const data = imageData.data
+      const out = ctx.createImageData(canvas.width, canvas.height)
+
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i] / 255
+        const g = data[i + 1] / 255
+        const b = data[i + 2] / 255
+
+        const max = Math.max(r, g, b)
+        const min = Math.min(r, g, b)
+        const lum = (max + min) / 2
+        const sat = max === min ? 0 : (max - min) / (lum > 0.5 ? (2 - max - min) : (max + min))
+
+        let metalScore: number
+        switch (mode) {
+          case 'warm':
+            // Copper, brass, gold — warm tones are metallic
+            metalScore = ((r * 0.6 + g * 0.3) - (b * 0.5 + g * 0.2)) * 0.6 + sat * 0.25 + lum * 0.15
+            break
+          case 'cool':
+            // Steel, silver, chrome — high luminance + low saturation = metallic
+            metalScore = lum * 0.55 + (1 - sat) * 0.3 + (1 - Math.abs(r - b)) * 0.15
+            break
+          case 'luminance':
+            // Any metal — brighter areas are metallic (good for car paint, mixed metals)
+            metalScore = lum * 0.7 + (1 - sat * 0.3) * 0.3
+            break
+          case 'saturation':
+            // Bare metal vs painted/oxidized — low saturation = bare metal
+            metalScore = (1 - sat) * 0.6 + lum * 0.4
+            break
+          default:
+            metalScore = lum
+        }
+
+        const edge = 1 / (1 + Math.exp(-(metalScore - threshold) / Math.max(softness * 0.15, 0.01)))
+        const val = Math.round(edge * 255)
+
+        out.data[i] = val
+        out.data[i + 1] = val
+        out.data[i + 2] = val
+        out.data[i + 3] = 255
+      }
+
+      ctx.putImageData(out, 0, 0)
+      const dataUrl = canvas.toDataURL('image/png')
+      setMetallicMapUrl(dataUrl)
+      setIgnoreMetallicMap(false)
+    }
+    img.src = textureUrl
+  }, [textureUrl])
 
   // --- Shared response handler ---
   const applyResult = (data: any) => {
@@ -529,11 +613,11 @@ function App() {
       <header className="header">
         <div className="logo">
           <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="2" width="12" height="12" rx="2" fill="#6366f1"/>
-            <rect x="18" y="2" width="12" height="12" rx="2" fill="#818cf8"/>
-            <rect x="2" y="18" width="12" height="12" rx="2" fill="#818cf8"/>
-            <rect x="18" y="18" width="12" height="12" rx="2" fill="#a5b4fc"/>
-            <path d="M8 8L24 24M24 8L8 24" stroke="white" strokeWidth="2" strokeLinecap="round" opacity="0.6"/>
+            <rect x="2" y="2" width="12" height="12" rx="2" fill="#c4956e"/>
+            <rect x="18" y="2" width="12" height="12" rx="2" fill="#d4a87e"/>
+            <rect x="2" y="18" width="12" height="12" rx="2" fill="#d4a87e"/>
+            <rect x="18" y="18" width="12" height="12" rx="2" fill="#e8d4c0"/>
+            <path d="M8 8L24 24M24 8L8 24" stroke="white" strokeWidth="2" strokeLinecap="round" opacity="0.5"/>
           </svg>
           <h1>Surfaced</h1>
         </div>
@@ -647,10 +731,15 @@ function App() {
           {mode === 'image-to-pbr' && (
             <section className="section">
               <h2>Image to PBR Maps</h2>
-              <p className="hint">Upload a texture image to generate PBR maps from it</p>
-              <input type="file" accept="image/*" onChange={(e) => handleFileSelect(e, 'upload')} />
+              <div className="file-upload-area">
+                <input type="file" accept="image/*" onChange={(e) => handleFileSelect(e, 'upload')} />
+                <div className="file-upload-label">
+                  {uploadFile ? uploadFile.name : <><strong>Choose file</strong> or drag & drop</>}
+                </div>
+                <div className="file-upload-hint">PNG, JPG, WebP</div>
+              </div>
               {uploadPreview && (
-                <img src={uploadPreview} alt="Upload preview" style={{ width: '100%', marginTop: 8, borderRadius: 4 }} />
+                <img src={uploadPreview} alt="Upload preview" className="upload-preview" />
               )}
             </section>
           )}
@@ -659,10 +748,15 @@ function App() {
           {mode === 'extract' && (
             <section className="section">
               <h2>Extract Material</h2>
-              <p className="hint">Upload a scene photo and label the material to extract</p>
-              <input type="file" accept="image/*" onChange={(e) => handleFileSelect(e, 'extract')} />
+              <div className="file-upload-area">
+                <input type="file" accept="image/*" onChange={(e) => handleFileSelect(e, 'extract')} />
+                <div className="file-upload-label">
+                  {extractFile ? extractFile.name : <><strong>Choose a scene photo</strong></>}
+                </div>
+                <div className="file-upload-hint">Upload a photo containing the material to extract</div>
+              </div>
               {extractPreview && (
-                <img src={extractPreview} alt="Extract preview" style={{ width: '100%', marginTop: 8, borderRadius: 4 }} />
+                <img src={extractPreview} alt="Extract preview" className="upload-preview" />
               )}
               <input
                 type="text"
@@ -670,9 +764,9 @@ function App() {
                 placeholder="Material label... e.g., 'brick wall', 'wood floor'"
                 value={extractLabel}
                 onChange={(e) => setExtractLabel(e.target.value)}
-                style={{ marginTop: 8 }}
+                style={{ marginTop: '0.6rem', minHeight: 'auto' }}
               />
-              <label style={{ marginTop: 8 }}>
+              <label style={{ marginTop: '0.5rem' }}>
                 Upscale:
                 <select value={upscaleFactor} onChange={(e) => setUpscaleFactor(parseInt(e.target.value))}>
                   <option value={0}>None</option>
@@ -782,7 +876,7 @@ function App() {
               {textureId && (
                 <section className="section">
                   <h2>Save Current Material</h2>
-                  <div style={{ display: 'flex', gap: 6 }}>
+                  <div style={{ display: 'flex', gap: '0.4rem' }}>
                     <input
                       type="text"
                       placeholder="Material name..."
@@ -791,10 +885,10 @@ function App() {
                       style={{ flex: 1 }}
                     />
                     <button
-                      className="generate-btn"
+                      className="btn-secondary"
                       onClick={handleSaveMaterial}
                       disabled={saving || !saveName.trim()}
-                      style={{ padding: '6px 16px', whiteSpace: 'nowrap' }}
+                      style={{ width: 'auto', padding: '0.4rem 1rem', marginTop: 0, whiteSpace: 'nowrap' }}
                     >
                       {saving ? 'Saving...' : 'Save'}
                     </button>
@@ -806,43 +900,34 @@ function App() {
                 <h2>Saved Materials ({libraryItems.length})</h2>
               </section>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, overflowY: 'auto' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', overflowY: 'auto' }}>
                 {libraryItems.map(item => (
-                  <div key={item.id} style={{
-                    display: 'flex', gap: 8, alignItems: 'center',
-                    padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: 6,
-                  }}>
+                  <div key={item.id} className="library-item">
                     {item.thumbnail_url && (
                       <img
                         src={`${API_URL}${item.thumbnail_url}`}
                         alt={item.name}
-                        style={{ width: 56, height: 56, borderRadius: 4, objectFit: 'cover', cursor: 'pointer' }}
+                        className="library-thumb"
                         onClick={() => handleLoadMaterial(item.id)}
                       />
                     )}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 600, fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {item.name}
-                      </div>
-                      <div style={{ fontSize: '0.7rem', opacity: 0.6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {item.prompt || 'No prompt'}
-                      </div>
-                      <div style={{ fontSize: '0.65rem', opacity: 0.4 }}>
-                        {item.engine} &middot; {item.created}
-                      </div>
+                    <div className="library-meta">
+                      <div className="library-name">{item.name}</div>
+                      <div className="library-prompt">{item.prompt || 'No prompt'}</div>
+                      <div className="library-info">{item.engine} &middot; {item.created}</div>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <button className="preset-btn" onClick={() => handleLoadMaterial(item.id)} style={{ fontSize: '0.7rem', padding: '3px 8px' }}>
+                    <div className="library-actions">
+                      <button className="preset-btn" onClick={() => handleLoadMaterial(item.id)} style={{ fontSize: '0.7rem', padding: '0.25rem 0.6rem' }}>
                         Load
                       </button>
-                      <button className="preset-btn" onClick={() => handleDeleteMaterial(item.id)} style={{ fontSize: '0.7rem', padding: '3px 8px', opacity: 0.6 }}>
+                      <button className="btn-danger" onClick={() => handleDeleteMaterial(item.id)}>
                         Delete
                       </button>
                     </div>
                   </div>
                 ))}
                 {libraryItems.length === 0 && (
-                  <p className="hint" style={{ textAlign: 'center', padding: '1rem' }}>
+                  <p className="hint" style={{ textAlign: 'center', padding: '1.5rem 1rem' }}>
                     No saved materials yet. Generate a material, then come here to save it.
                   </p>
                 )}
@@ -929,252 +1014,355 @@ function App() {
           )}
           <Suspense fallback={<div className="loading">Loading 3D Preview...</div>}>
             <MaterialPreview
-              textureUrl={activeTextureUrl}
-              normalMapUrl={activeNormalUrl}
-              heightMapUrl={activeHeightUrl}
-              roughnessMapUrl={activeRoughnessUrl}
-              emissiveMapUrl={emissiveMapUrl}
-              aoMapUrl={aoMapUrl}
-              metallicMapUrl={activeMetallicUrl}
-              translucencyMapUrl={translucencyMapUrl}
-              subsurfaceMapUrl={subsurfaceMapUrl}
-              roughness={roughness}
-              metalness={metalness}
-              specularIntensity={specularIntensity}
-              normalScale={normalScale}
-              displacementScale={displacementScale}
-              emissiveIntensity={emissiveIntensity}
-              aoIntensity={aoIntensity}
-              transmission={transmission}
-              thickness={thickness}
+              textureUrl={viewingMap ?? activeTextureUrl}
+              normalMapUrl={viewingMap ? null : activeNormalUrl}
+              heightMapUrl={viewingMap ? null : activeHeightUrl}
+              roughnessMapUrl={viewingMap ? null : activeRoughnessUrl}
+              emissiveMapUrl={viewingMap ? null : emissiveMapUrl}
+              aoMapUrl={viewingMap ? null : aoMapUrl}
+              metallicMapUrl={viewingMap ? null : activeMetallicUrl}
+              translucencyMapUrl={viewingMap ? null : translucencyMapUrl}
+              subsurfaceMapUrl={viewingMap ? null : subsurfaceMapUrl}
+              roughness={viewingMap ? 0.8 : roughness}
+              metalness={viewingMap ? 0.0 : metalness}
+              specularIntensity={viewingMap ? 0.2 : specularIntensity}
+              normalScale={viewingMap ? 0 : normalScale}
+              displacementScale={viewingMap ? 0 : displacementScale}
+              emissiveIntensity={viewingMap ? 0 : emissiveIntensity}
+              aoIntensity={viewingMap ? 0 : aoIntensity}
+              transmission={viewingMap ? 0 : transmission}
+              thickness={viewingMap ? 0 : thickness}
               subsurfaceColor={subsurfaceColor}
               autoRotate={autoRotate}
               environment={environment}
-              envIntensity={envIntensity}
-              keyLightIntensity={keyLightIntensity}
-              fillLightIntensity={fillLightIntensity}
-              rimLightIntensity={rimLightIntensity}
+              envIntensity={viewingMap ? 1.5 : envIntensity}
+              keyLightIntensity={viewingMap ? 2.0 : keyLightIntensity}
+              fillLightIntensity={viewingMap ? 1.0 : fillLightIntensity}
+              rimLightIntensity={viewingMap ? 0.3 : rimLightIntensity}
               normalFlipR={normalFlipR}
               normalFlipG={normalFlipG}
               normalFlipB={normalFlipB}
               tileRepeat={tileRepeat}
+              ignoreMetallicMap={ignoreMetallicMap}
+              ignoreRoughnessMap={ignoreRoughnessMap}
+              invertRoughness={invertRoughness}
               geometry={geometry}
               customMeshUrl={customMeshUrl}
             />
           </Suspense>
-          {activeTextureUrl && (
-            <div className="texture-preview">
-              <img src={activeTextureUrl} alt="Generated texture" />
-            </div>
+          {viewingMap && (
+            <div className="map-viewer-label">{viewingMapLabel}</div>
           )}
+          {activeTextureUrl && (() => {
+            const maps = [
+              { url: activeTextureUrl, label: 'Color' },
+              { url: activeNormalUrl, label: 'Normal' },
+              { url: activeRoughnessUrl, label: 'Rough' },
+              { url: activeMetallicUrl, label: 'Metal' },
+              { url: activeHeightUrl, label: 'Height' },
+              { url: emissiveMapUrl, label: 'Emissive' },
+              { url: aoMapUrl, label: 'AO' },
+            ].filter(m => m.url)
+            return (
+              <div className="map-strip">
+                {maps.map(m => (
+                  <div
+                    key={m.label}
+                    className={`map-strip-item ${viewingMap === m.url ? 'active' : ''}`}
+                    onClick={() => {
+                      if (viewingMap === m.url) {
+                        setViewingMap(null)
+                        setViewingMapLabel(null)
+                      } else {
+                        setViewingMap(m.url!)
+                        setViewingMapLabel(m.label)
+                      }
+                    }}
+                  >
+                    <img src={m.url!} alt={m.label} />
+                    <span>{m.label}</span>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
         </div>
 
         {/* Right Panel */}
         <aside className="panel right-panel">
-          <section className="section">
-            <h2>Material Properties</h2>
-            <label>
-              Roughness: {roughness.toFixed(2)}
-              <input type="range" min="0" max="1" step="0.01" value={roughness}
-                onChange={(e) => setRoughness(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Metalness: {metalness.toFixed(2)}
-              <input type="range" min="0" max="1" step="0.01" value={metalness}
-                onChange={(e) => setMetalness(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Specular: {specularIntensity.toFixed(2)}
-              <input type="range" min="0" max="1" step="0.01" value={specularIntensity}
-                onChange={(e) => setSpecularIntensity(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Normal Strength: {normalScale.toFixed(2)}
-              <input type="range" min="0" max="2" step="0.01" value={normalScale}
-                onChange={(e) => setNormalScale(parseFloat(e.target.value))} />
-            </label>
-            <div className="channel-flip-row">
-              <span>Flip Normal:</span>
-              <label className="channel-flip">
-                <input type="checkbox" checked={normalFlipR} onChange={(e) => setNormalFlipR(e.target.checked)} /> R
-              </label>
-              <label className="channel-flip">
-                <input type="checkbox" checked={normalFlipG} onChange={(e) => setNormalFlipG(e.target.checked)} /> G
-              </label>
-              <label className="channel-flip">
-                <input type="checkbox" checked={normalFlipB} onChange={(e) => setNormalFlipB(e.target.checked)} /> B
-              </label>
-            </div>
-            <label>
-              Displacement: {displacementScale.toFixed(3)}
-              <input type="range" min="0" max="0.3" step="0.005" value={displacementScale}
-                onChange={(e) => setDisplacementScale(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Emissive: {emissiveIntensity.toFixed(2)}
-              <input type="range" min="0" max="2" step="0.01" value={emissiveIntensity}
-                onChange={(e) => setEmissiveIntensity(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              AO Intensity: {aoIntensity.toFixed(2)}
-              <input type="range" min="0" max="2" step="0.01" value={aoIntensity}
-                onChange={(e) => setAoIntensity(parseFloat(e.target.value))} />
-            </label>
-          </section>
-
-          {/* Translucency & SSS */}
-          <section className="section">
-            <h2>Translucency / SSS</h2>
-            <label>
-              <input type="checkbox" checked={transmission > 0}
-                onChange={(e) => setTransmission(e.target.checked ? 0.5 : 0)} />
-              Enable Translucency
-            </label>
-            {transmission > 0 && (
+          <details className="section-collapse" open>
+            <summary>Material Properties</summary>
+            <div className="section-body">
               <label>
-                Transmission: {transmission.toFixed(2)}
-                <input type="range" min="0.01" max="1" step="0.01" value={transmission}
-                  onChange={(e) => setTransmission(parseFloat(e.target.value))} />
+                Roughness: {roughness.toFixed(2)}
+                <input type="range" min="0" max="1" step="0.01" value={roughness}
+                  onChange={(e) => setRoughness(parseFloat(e.target.value))} />
               </label>
-            )}
-            <label>
-              <input type="checkbox" checked={thickness > 0}
-                onChange={(e) => setThickness(e.target.checked ? 1.0 : 0)} />
-              Enable SSS
-            </label>
-            {thickness > 0 && (
-              <>
-                <label>
-                  Thickness: {thickness.toFixed(2)}
-                  <input type="range" min="0.05" max="5" step="0.05" value={thickness}
-                    onChange={(e) => setThickness(parseFloat(e.target.value))} />
+              {roughnessMapUrl && (
+                <>
+                  <label style={{ fontSize: '0.75rem' }}>
+                    <input type="checkbox" checked={ignoreRoughnessMap}
+                      onChange={(e) => setIgnoreRoughnessMap(e.target.checked)} />
+                    Override roughness map
+                  </label>
+                  <label style={{ fontSize: '0.75rem' }}>
+                    <input type="checkbox" checked={invertRoughness}
+                      onChange={(e) => setInvertRoughness(e.target.checked)} />
+                    Invert roughness map
+                  </label>
+                </>
+              )}
+              <label>
+                Metalness: {metalness.toFixed(2)}
+                <input type="range" min="0" max="1" step="0.01" value={metalness}
+                  onChange={(e) => setMetalness(parseFloat(e.target.value))} />
+              </label>
+              {metallicMapUrl && (
+                <label style={{ fontSize: '0.75rem' }}>
+                  <input type="checkbox" checked={ignoreMetallicMap}
+                    onChange={(e) => setIgnoreMetallicMap(e.target.checked)} />
+                  Override metallic map
                 </label>
-                <label>
-                  SSS Color
-                  <input type="color" value={subsurfaceColor}
-                    onChange={(e) => setSubsurfaceColor(e.target.value)} />
+              )}
+              {textureUrl && (
+                <div style={{ marginBottom: '0.65rem' }}>
+                  <label style={{ fontSize: '0.72rem' }}>
+                    Derive mode:
+                    <select value={metallicDeriveMode} onChange={(e) => setMetallicDeriveMode(e.target.value as any)}
+                      style={{ fontSize: '0.75rem' }}>
+                      <option value="warm">Warm metals (copper, brass, gold)</option>
+                      <option value="cool">Cool metals (steel, silver, chrome)</option>
+                      <option value="luminance">By brightness (car paint, mixed)</option>
+                      <option value="saturation">By saturation (bare vs painted)</option>
+                    </select>
+                  </label>
+                  <button className="preset-btn" onClick={() => deriveMetallicMap(metallicThreshold, metallicSoftness, metallicDeriveMode)}
+                    style={{ width: '100%', textAlign: 'center', marginBottom: '0.4rem' }}>
+                    Derive metallic from color
+                  </button>
+                  <label style={{ fontSize: '0.72rem' }}>
+                    Threshold: {metallicThreshold.toFixed(2)}
+                    <input type="range" min="0" max="1" step="0.02" value={metallicThreshold}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value)
+                        setMetallicThreshold(v)
+                        deriveMetallicMap(v, metallicSoftness, metallicDeriveMode)
+                      }} />
+                  </label>
+                  <label style={{ fontSize: '0.72rem' }}>
+                    Softness: {metallicSoftness.toFixed(2)}
+                    <input type="range" min="0.02" max="1" step="0.02" value={metallicSoftness}
+                      onChange={(e) => {
+                        const v = parseFloat(e.target.value)
+                        setMetallicSoftness(v)
+                        deriveMetallicMap(metallicThreshold, v, metallicDeriveMode)
+                      }} />
+                  </label>
+                </div>
+              )}
+              <label>
+                Specular: {specularIntensity.toFixed(2)}
+                <input type="range" min="0" max="1" step="0.01" value={specularIntensity}
+                  onChange={(e) => setSpecularIntensity(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                Normal Strength: {normalScale.toFixed(2)}
+                <input type="range" min="0" max="2" step="0.01" value={normalScale}
+                  onChange={(e) => setNormalScale(parseFloat(e.target.value))} />
+              </label>
+              <div className="channel-flip-row">
+                <span>Flip Normal:</span>
+                <label className="channel-flip">
+                  <input type="checkbox" checked={normalFlipR} onChange={(e) => setNormalFlipR(e.target.checked)} /> R
                 </label>
-              </>
-            )}
-          </section>
-
-          {/* Height Map Controls */}
-          <section className="section">
-            <h2>Height Map</h2>
-            <label>
-              Contrast: {heightContrast.toFixed(2)}
-              <input type="range" min="0.1" max="3.0" step="0.05" value={heightContrast}
-                onChange={(e) => setHeightContrast(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Brightness: {heightBrightness.toFixed(2)}
-              <input type="range" min="-0.5" max="0.5" step="0.01" value={heightBrightness}
-                onChange={(e) => setHeightBrightness(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Blur: {heightBlur.toFixed(1)}
-              <input type="range" min="0" max="10" step="0.5" value={heightBlur}
-                onChange={(e) => setHeightBlur(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              <input type="checkbox" checked={heightInvert} onChange={(e) => setHeightInvert(e.target.checked)} />
-              Invert height
-            </label>
-          </section>
-
-          <section className="section">
-            <h2>Lighting</h2>
-            <label>
-              Environment: {envIntensity.toFixed(2)}
-              <input type="range" min="0" max="3" step="0.05" value={envIntensity}
-                onChange={(e) => setEnvIntensity(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Key Light: {keyLightIntensity.toFixed(2)}
-              <input type="range" min="0" max="5" step="0.05" value={keyLightIntensity}
-                onChange={(e) => setKeyLightIntensity(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Fill Light: {fillLightIntensity.toFixed(2)}
-              <input type="range" min="0" max="3" step="0.05" value={fillLightIntensity}
-                onChange={(e) => setFillLightIntensity(parseFloat(e.target.value))} />
-            </label>
-            <label>
-              Rim Light: {rimLightIntensity.toFixed(2)}
-              <input type="range" min="0" max="3" step="0.05" value={rimLightIntensity}
-                onChange={(e) => setRimLightIntensity(parseFloat(e.target.value))} />
-            </label>
-          </section>
-
-          <section className="section">
-            <h2>Viewport</h2>
-            <label>
-              Geometry:
-              <select value={geometry} onChange={(e) => setGeometry(e.target.value as any)}>
-                <option value="sphere">Sphere</option>
-                <option value="plane">Plane</option>
-                <option value="cube">Cube</option>
-                <option value="custom">Custom Mesh</option>
-              </select>
-            </label>
-            {geometry === 'custom' && (
-              <div>
-                <input type="file" accept=".glb,.gltf,.obj" onChange={(e) => {
-                  const file = e.target.files?.[0]
-                  if (file) setCustomMeshUrl(URL.createObjectURL(file))
-                }} />
-                <p className="hint">Upload .glb, .gltf, or .obj</p>
+                <label className="channel-flip">
+                  <input type="checkbox" checked={normalFlipG} onChange={(e) => setNormalFlipG(e.target.checked)} /> G
+                </label>
+                <label className="channel-flip">
+                  <input type="checkbox" checked={normalFlipB} onChange={(e) => setNormalFlipB(e.target.checked)} /> B
+                </label>
               </div>
-            )}
-            <label>
-              Tile Repeat: {tileRepeat}x{tileRepeat}
-              <input type="range" min="1" max="8" step="1" value={tileRepeat}
-                onChange={(e) => setTileRepeat(parseInt(e.target.value))} />
-            </label>
-            <label>
-              <input type="checkbox" checked={autoRotate} onChange={(e) => setAutoRotate(e.target.checked)} />
-              Auto-rotate
-            </label>
-            <label>
-              Environment:
-              <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
-                <option value="studio">Studio</option>
-                <option value="sunset">Sunset</option>
-                <option value="dawn">Dawn</option>
-                <option value="night">Night</option>
-                <option value="warehouse">Warehouse</option>
-                <option value="forest">Forest</option>
-                <option value="apartment">Apartment</option>
-                <option value="city">City</option>
-                <option value="park">Park</option>
-                <option value="lobby">Lobby</option>
-              </select>
-            </label>
-          </section>
-
-          {/* Download Maps */}
-          <section className="section">
-            <h2>Download Maps</h2>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              <button className="preset-btn" disabled={!textureUrl} onClick={() => downloadMap(textureUrl, 'basecolor')}>Base Color</button>
-              <button className="preset-btn" disabled={!normalMapUrl} onClick={() => downloadMap(normalMapUrl, 'normal')}>Normal</button>
-              <button className="preset-btn" disabled={!roughnessMapUrl} onClick={() => downloadMap(roughnessMapUrl, 'roughness')}>Roughness</button>
-              <button className="preset-btn" disabled={!metallicMapUrl} onClick={() => downloadMap(metallicMapUrl, 'metallic')}>Metallic</button>
-              <button className="preset-btn" disabled={!heightMapUrl} onClick={() => downloadMap(heightMapUrl, 'height')}>Height</button>
-              <button className="preset-btn" disabled={!emissiveMapUrl} onClick={() => downloadMap(emissiveMapUrl, 'emissive')}>Emissive</button>
+              <label>
+                Displacement: {displacementScale.toFixed(3)}
+                <input type="range" min="0" max="0.3" step="0.005" value={displacementScale}
+                  onChange={(e) => setDisplacementScale(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                Emissive: {emissiveIntensity.toFixed(2)}
+                <input type="range" min="0" max="2" step="0.01" value={emissiveIntensity}
+                  onChange={(e) => setEmissiveIntensity(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                AO Intensity: {aoIntensity.toFixed(2)}
+                <input type="range" min="0" max="2" step="0.01" value={aoIntensity}
+                  onChange={(e) => setAoIntensity(parseFloat(e.target.value))} />
+              </label>
             </div>
-            <button className="export-btn" onClick={handleDownloadAll} disabled={!textureId} style={{ marginTop: 8 }}>
-              Download All (ZIP)
-            </button>
-          </section>
+          </details>
 
-          <section className="section">
-            <h2>Export</h2>
-            <button className="export-btn" onClick={handleExport} disabled={!textureUrl}>
-              Export for Unreal
-            </button>
-            <p className="export-info">Includes: Textures, Python script for UE5</p>
-          </section>
+          <details className="section-collapse">
+            <summary>Translucency / SSS</summary>
+            <div className="section-body">
+              <label>
+                <input type="checkbox" checked={transmission > 0}
+                  onChange={(e) => setTransmission(e.target.checked ? 0.5 : 0)} />
+                Enable Translucency
+              </label>
+              {transmission > 0 && (
+                <label>
+                  Transmission: {transmission.toFixed(2)}
+                  <input type="range" min="0.01" max="1" step="0.01" value={transmission}
+                    onChange={(e) => setTransmission(parseFloat(e.target.value))} />
+                </label>
+              )}
+              <label>
+                <input type="checkbox" checked={thickness > 0}
+                  onChange={(e) => setThickness(e.target.checked ? 1.0 : 0)} />
+                Enable SSS
+              </label>
+              {thickness > 0 && (
+                <>
+                  <label>
+                    Thickness: {thickness.toFixed(2)}
+                    <input type="range" min="0.05" max="5" step="0.05" value={thickness}
+                      onChange={(e) => setThickness(parseFloat(e.target.value))} />
+                  </label>
+                  <label>
+                    SSS Color
+                    <input type="color" value={subsurfaceColor}
+                      onChange={(e) => setSubsurfaceColor(e.target.value)} />
+                  </label>
+                </>
+              )}
+            </div>
+          </details>
+
+          <details className="section-collapse">
+            <summary>Height Map</summary>
+            <div className="section-body">
+              <label>
+                Contrast: {heightContrast.toFixed(2)}
+                <input type="range" min="0.1" max="3.0" step="0.05" value={heightContrast}
+                  onChange={(e) => setHeightContrast(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                Brightness: {heightBrightness.toFixed(2)}
+                <input type="range" min="-0.5" max="0.5" step="0.01" value={heightBrightness}
+                  onChange={(e) => setHeightBrightness(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                Blur: {heightBlur.toFixed(1)}
+                <input type="range" min="0" max="10" step="0.5" value={heightBlur}
+                  onChange={(e) => setHeightBlur(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                <input type="checkbox" checked={heightInvert} onChange={(e) => setHeightInvert(e.target.checked)} />
+                Invert height
+              </label>
+            </div>
+          </details>
+
+          <details className="section-collapse">
+            <summary>Lighting</summary>
+            <div className="section-body">
+              <label>
+                Environment: {envIntensity.toFixed(2)}
+                <input type="range" min="0" max="3" step="0.05" value={envIntensity}
+                  onChange={(e) => setEnvIntensity(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                Key Light: {keyLightIntensity.toFixed(2)}
+                <input type="range" min="0" max="5" step="0.05" value={keyLightIntensity}
+                  onChange={(e) => setKeyLightIntensity(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                Fill Light: {fillLightIntensity.toFixed(2)}
+                <input type="range" min="0" max="3" step="0.05" value={fillLightIntensity}
+                  onChange={(e) => setFillLightIntensity(parseFloat(e.target.value))} />
+              </label>
+              <label>
+                Rim Light: {rimLightIntensity.toFixed(2)}
+                <input type="range" min="0" max="3" step="0.05" value={rimLightIntensity}
+                  onChange={(e) => setRimLightIntensity(parseFloat(e.target.value))} />
+              </label>
+            </div>
+          </details>
+
+          <details className="section-collapse" open>
+            <summary>Viewport</summary>
+            <div className="section-body">
+              <label>
+                Geometry:
+                <select value={geometry} onChange={(e) => setGeometry(e.target.value as any)}>
+                  <option value="sphere">Sphere</option>
+                  <option value="plane">Plane</option>
+                  <option value="cube">Cube</option>
+                  <option value="custom">Custom Mesh</option>
+                </select>
+              </label>
+              {geometry === 'custom' && (
+                <div className="file-upload-area" style={{ marginBottom: '0.5rem' }}>
+                  <input type="file" accept=".glb,.gltf,.obj" onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    if (file) setCustomMeshUrl(URL.createObjectURL(file))
+                  }} />
+                  <div className="file-upload-label"><strong>Upload mesh</strong></div>
+                  <div className="file-upload-hint">.glb, .gltf, or .obj</div>
+                </div>
+              )}
+              <label>
+                Tile Repeat: {tileRepeat}x{tileRepeat}
+                <input type="range" min="1" max="8" step="1" value={tileRepeat}
+                  onChange={(e) => setTileRepeat(parseInt(e.target.value))} />
+              </label>
+              <label>
+                <input type="checkbox" checked={autoRotate} onChange={(e) => setAutoRotate(e.target.checked)} />
+                Auto-rotate
+              </label>
+              <label>
+                Environment:
+                <select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+                  <option value="studio">Studio</option>
+                  <option value="sunset">Sunset</option>
+                  <option value="dawn">Dawn</option>
+                  <option value="night">Night</option>
+                  <option value="warehouse">Warehouse</option>
+                  <option value="forest">Forest</option>
+                  <option value="apartment">Apartment</option>
+                  <option value="city">City</option>
+                  <option value="park">Park</option>
+                  <option value="lobby">Lobby</option>
+                </select>
+              </label>
+            </div>
+          </details>
+
+          <details className="section-collapse" open>
+            <summary>Download Maps</summary>
+            <div className="section-body">
+              <div className="map-download-grid">
+                <button className="preset-btn" disabled={!textureUrl} onClick={() => downloadMap(textureUrl, 'basecolor')}>Base Color</button>
+                <button className="preset-btn" disabled={!normalMapUrl} onClick={() => downloadMap(normalMapUrl, 'normal')}>Normal</button>
+                <button className="preset-btn" disabled={!roughnessMapUrl} onClick={() => downloadMap(roughnessMapUrl, 'roughness')}>Roughness</button>
+                <button className="preset-btn" disabled={!metallicMapUrl} onClick={() => downloadMap(metallicMapUrl, 'metallic')}>Metallic</button>
+                <button className="preset-btn" disabled={!heightMapUrl} onClick={() => downloadMap(heightMapUrl, 'height')}>Height</button>
+                <button className="preset-btn" disabled={!emissiveMapUrl} onClick={() => downloadMap(emissiveMapUrl, 'emissive')}>Emissive</button>
+              </div>
+              <button className="btn-secondary" onClick={handleDownloadAll} disabled={!textureId} style={{ marginTop: '0.5rem' }}>
+                Download All (ZIP)
+              </button>
+            </div>
+          </details>
+
+          <details className="section-collapse">
+            <summary>Export</summary>
+            <div className="section-body">
+              <button className="btn-secondary" onClick={handleExport} disabled={!textureUrl}>
+                Export for Unreal
+              </button>
+              <p className="export-info">Includes: Textures, Python script for UE5</p>
+            </div>
+          </details>
         </aside>
       </main>
     </div>
