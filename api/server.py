@@ -40,6 +40,8 @@ from grid_utils import (
 # Paths
 OUTPUT_DIR = PROJECT_ROOT / "api" / "outputs"
 LIBRARY_DIR = PROJECT_ROOT / "api" / "library"
+LAYERS_FILE = PROJECT_ROOT / "api" / "layers.json"
+MOTION_FILE = PROJECT_ROOT / "api" / "motion.json"
 LORA_PATH = PROJECT_ROOT / "output" / "loras" / "pbr-materials-multimap-v1" / "final_lora"
 MERGED_MODEL_PATH = PROJECT_ROOT / "output" / "merged_model_multimap"
 
@@ -125,6 +127,61 @@ class SaveMaterialRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Layer stack models — mirrors ui/src/types/layers.ts
+# ---------------------------------------------------------------------------
+
+class ChannelSettings(BaseModel):
+    enabled: bool = True
+
+
+class LayerMask(BaseModel):
+    enabled: bool = False
+    noiseType: str = "perlin"  # 'perlin' | 'voronoi'
+    scale: float = 4
+    seed: int = 0
+    invert: bool = False
+
+
+class PbrMaps(BaseModel):
+    basecolor: Optional[str] = None
+    normal: Optional[str] = None
+    roughness: Optional[str] = None
+    metalness: Optional[str] = None
+    height: Optional[str] = None
+    translucency: Optional[str] = None
+    subsurface: Optional[str] = None
+
+
+class Layer(BaseModel):
+    id: str
+    name: str
+    visible: bool = True
+    opacity: float = 1.0
+    blendMode: str = "normal"
+    type: str = "material"  # 'material' | 'solid' | 'noise'
+
+    materialPrompt: str = ""
+    materialMaps: dict = {}
+    generating: bool = False
+
+    channels: dict = {}
+
+    color: str = "#888888"
+
+    noiseType: str = "perlin"
+    noiseScale: float = 4
+    noiseSeed: int = 0
+    noiseColor1: str = "#000000"
+    noiseColor2: str = "#ffffff"
+
+    mask: dict = {}
+
+
+class ReorderRequest(BaseModel):
+    order: list[str]  # list of layer IDs in desired order
+
+
+# ---------------------------------------------------------------------------
 # Emissive map — still derived from albedo (threshold-based)
 # ---------------------------------------------------------------------------
 
@@ -133,6 +190,77 @@ def generate_emissive_map(image: Image.Image) -> Image.Image:
     gray = np.array(image.convert('L')).astype(np.float32) / 255.0
     emissive = np.clip((gray - 0.85) / 0.15, 0.0, 1.0)
     return Image.fromarray((emissive * 255).astype(np.uint8))
+
+
+# ---------------------------------------------------------------------------
+# PBR map normalization
+# ---------------------------------------------------------------------------
+# Flux/PATINA tend to output dark roughness maps and noisy metallic maps.
+# In Three.js meshPhysicalMaterial the roughness slider multiplies the map,
+# so dark maps lock the surface into reflective no matter the slider. These
+# helpers rebalance both so the slider behaves as users expect.
+
+METAL_KEYWORDS = frozenset({
+    "metal", "metals", "metallic", "metalness",
+    "steel", "iron", "copper", "brass", "bronze", "gold", "silver",
+    "chrome", "chromed", "aluminum", "aluminium", "tin", "lead",
+    "nickel", "titanium", "platinum", "zinc", "pewter", "alloy",
+    "rust", "rusted", "rusty", "corroded", "oxidized", "patina",
+    "anodized", "galvanized", "plated", "gilded", "foil",
+})
+
+
+def _prompt_has_metal(prompt: str) -> bool:
+    if not prompt:
+        return False
+    lowered = prompt.lower()
+    tokens = set(lowered.replace("-", " ").replace("_", " ").split())
+    return bool(tokens & METAL_KEYWORDS)
+
+
+def normalize_roughness_map(img: Image.Image, min_mean: float = 0.55) -> Image.Image:
+    """Lift roughness if its mean is below min_mean (too reflective).
+
+    Uses a gamma that maps current_mean -> min_mean so bright areas stay
+    relatively bright and dark areas get lifted more. If the map is already
+    bright enough, return unchanged.
+    """
+    gray = img.convert("L")
+    arr = np.array(gray, dtype=np.float32) / 255.0
+    current_mean = float(arr.mean())
+    if current_mean >= min_mean:
+        return gray
+    if current_mean < 1e-3:
+        return Image.new("L", gray.size, int(min_mean * 255))
+    gamma = float(np.log(min_mean) / np.log(current_mean))
+    arr = np.clip(np.power(arr, gamma), 0.0, 1.0)
+    return Image.fromarray((arr * 255).astype(np.uint8), mode="L")
+
+
+def zero_metallic_map(size: tuple[int, int]) -> Image.Image:
+    return Image.new("L", size, 0)
+
+
+def normalize_pbr_maps(maps: dict, prompt: str) -> dict:
+    """Fix roughness brightness and kill spurious metallic for non-metal prompts."""
+    result = dict(maps)
+    rough = result.get("roughness")
+    if rough is not None:
+        result["roughness"] = normalize_roughness_map(rough)
+    metal = result.get("metallic")
+    if metal is not None and not _prompt_has_metal(prompt):
+        result["metallic"] = zero_metallic_map(metal.size)
+    return result
+
+
+def postprocess_pbr_files(texture_id: str, prompt: str) -> None:
+    """Rewrite saved roughness/metallic PNGs on disk for prompt-based paths."""
+    rough_path = OUTPUT_DIR / f"{texture_id}_roughness.png"
+    if rough_path.exists():
+        normalize_roughness_map(Image.open(rough_path)).save(rough_path)
+    metal_path = OUTPUT_DIR / f"{texture_id}_metallic.png"
+    if metal_path.exists() and not _prompt_has_metal(prompt):
+        zero_metallic_map(Image.open(metal_path).size).save(metal_path)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +507,9 @@ async def generate(request: GenerateRequest):
     # Split grid into individual maps
     maps = split_grid(grid_image)
 
+    # Rebalance roughness / kill spurious metallic for non-metal prompts
+    maps = normalize_pbr_maps(maps, request.prompt)
+
     # Apply tiling to each map independently
     maps = apply_tiling_to_maps(maps, request.tiling_mode)
 
@@ -467,6 +598,7 @@ async def generate_patina(request: GenerateRequest):
         raise HTTPException(status_code=502, detail=f"PATINA API error: {e}")
 
     urls = _download_patina_maps(result, texture_id, hx)
+    postprocess_pbr_files(texture_id, request.prompt)
     return {
         **urls,
         "seed": result.get("seed", 0),
@@ -515,6 +647,9 @@ async def image_to_pbr(
         raise HTTPException(status_code=502, detail=f"PATINA API error: {e}")
 
     urls = _download_patina_maps(result, texture_id, hx)
+    rough_path = OUTPUT_DIR / f"{texture_id}_roughness.png"
+    if rough_path.exists():
+        normalize_roughness_map(Image.open(rough_path)).save(rough_path)
     return {
         **urls,
         "seed": result.get("seed", 0),
@@ -570,6 +705,7 @@ async def extract_material(
         raise HTTPException(status_code=502, detail=f"PATINA API error: {e}")
 
     urls = _download_patina_maps(result, texture_id, hx)
+    postprocess_pbr_files(texture_id, label)
     return {
         **urls,
         "seed": result.get("seed", 0),
@@ -971,6 +1107,259 @@ print(f"Material created: {{material_path}}")
         media_type="application/zip",
         filename=f"material_export_{export_id}.zip"
     )
+
+# ---------------------------------------------------------------------------
+# Layer Stack — server-side state with JSON persistence
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+_layer_lock = threading.Lock()
+_layer_stack: list[dict] = []
+
+
+def _default_channels() -> dict:
+    return {
+        "basecolor": {"enabled": True},
+        "normal": {"enabled": True},
+        "roughness": {"enabled": True},
+        "metalness": {"enabled": True},
+        "height": {"enabled": True},
+        "translucency": {"enabled": False},
+        "subsurface": {"enabled": False},
+    }
+
+
+def _default_mask() -> dict:
+    return {
+        "enabled": False,
+        "noiseType": "perlin",
+        "scale": 4,
+        "seed": 0,
+        "invert": False,
+    }
+
+
+def _layer_with_defaults(layer: dict) -> dict:
+    """Fill in missing fields on a layer dict with sensible defaults."""
+    out = dict(layer)
+    out.setdefault("id", f"layer-{uuid.uuid4().hex[:8]}")
+    out.setdefault("name", "Layer")
+    out.setdefault("visible", True)
+    out.setdefault("opacity", 1.0)
+    out.setdefault("blendMode", "normal")
+    out.setdefault("type", "material")
+    out.setdefault("materialPrompt", "")
+    out.setdefault("materialMaps", {})
+    out.setdefault("generating", False)
+    if not out.get("channels"):
+        out["channels"] = _default_channels()
+    out.setdefault("color", "#888888")
+    out.setdefault("noiseType", "perlin")
+    out.setdefault("noiseScale", 4)
+    out.setdefault("noiseSeed", 0)
+    out.setdefault("noiseColor1", "#000000")
+    out.setdefault("noiseColor2", "#ffffff")
+    if not out.get("mask"):
+        out["mask"] = _default_mask()
+    return out
+
+
+def _save_layers() -> None:
+    LAYERS_FILE.write_text(_json.dumps(_layer_stack, indent=2))
+
+
+def _load_layers() -> None:
+    global _layer_stack
+    if LAYERS_FILE.exists():
+        try:
+            _layer_stack = _json.loads(LAYERS_FILE.read_text())
+            if not isinstance(_layer_stack, list):
+                _layer_stack = []
+        except Exception as e:
+            print(f"Failed to load layers.json: {e}")
+            _layer_stack = []
+    else:
+        _layer_stack = []
+
+
+_load_layers()
+
+
+@app.get("/layers")
+async def list_layers():
+    """Return the current layer stack (bottom first, top last)."""
+    with _layer_lock:
+        return list(_layer_stack)
+
+
+@app.post("/layers")
+async def add_layer(layer: Optional[dict] = None):
+    """Append a new layer to the stack. If body is empty, creates a default layer."""
+    with _layer_lock:
+        new_layer = _layer_with_defaults(layer or {})
+        # Ensure name uniqueness by default
+        if layer is None or not layer.get("name"):
+            new_layer["name"] = f"Layer {len(_layer_stack) + 1}"
+        if not new_layer.get("id") or any(l["id"] == new_layer["id"] for l in _layer_stack):
+            new_layer["id"] = f"layer-{uuid.uuid4().hex[:8]}"
+        _layer_stack.append(new_layer)
+        _save_layers()
+        return new_layer
+
+
+@app.patch("/layers/{layer_id}")
+async def update_layer(layer_id: str, updates: dict):
+    """Partial update on a layer. Returns the updated layer."""
+    with _layer_lock:
+        for i, l in enumerate(_layer_stack):
+            if l["id"] == layer_id:
+                _layer_stack[i] = {**l, **updates, "id": layer_id}
+                _save_layers()
+                return _layer_stack[i]
+    raise HTTPException(status_code=404, detail="Layer not found")
+
+
+@app.delete("/layers/{layer_id}")
+async def delete_layer(layer_id: str):
+    """Remove a layer from the stack."""
+    with _layer_lock:
+        before = len(_layer_stack)
+        _layer_stack[:] = [l for l in _layer_stack if l["id"] != layer_id]
+        if len(_layer_stack) == before:
+            raise HTTPException(status_code=404, detail="Layer not found")
+        _save_layers()
+        return {"ok": True}
+
+
+@app.post("/layers/{layer_id}/duplicate")
+async def duplicate_layer(layer_id: str):
+    """Duplicate a layer, inserting the copy directly above the source."""
+    with _layer_lock:
+        for i, l in enumerate(_layer_stack):
+            if l["id"] == layer_id:
+                copy = dict(l)
+                copy["id"] = f"layer-{uuid.uuid4().hex[:8]}"
+                copy["name"] = f"{l.get('name', 'Layer')} copy"
+                _layer_stack.insert(i + 1, copy)
+                _save_layers()
+                return copy
+    raise HTTPException(status_code=404, detail="Layer not found")
+
+
+@app.post("/layers/reorder")
+async def reorder_layers(request: ReorderRequest):
+    """Reorder the stack. `order` must be a permutation of existing layer IDs."""
+    with _layer_lock:
+        current_ids = {l["id"] for l in _layer_stack}
+        if set(request.order) != current_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="order must contain exactly the current layer IDs",
+            )
+        by_id = {l["id"]: l for l in _layer_stack}
+        _layer_stack[:] = [by_id[i] for i in request.order]
+        _save_layers()
+        return list(_layer_stack)
+
+
+@app.delete("/layers")
+async def clear_layers():
+    """Remove all layers."""
+    with _layer_lock:
+        _layer_stack.clear()
+        _save_layers()
+        return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Motion / animation — server-side scalar animation state
+# ---------------------------------------------------------------------------
+
+_motion_lock = threading.Lock()
+_motion_state: dict = {}
+
+_ANIMATED_PROPS = {
+    "pan_x", "pan_y", "displacement", "transmission",
+    "ior", "emissive", "roughness", "metalness",
+}
+_ANIM_MODES = {"static", "sin", "cos", "linear"}
+
+
+def _save_motion() -> None:
+    MOTION_FILE.write_text(_json.dumps(_motion_state, indent=2))
+
+
+def _load_motion() -> None:
+    global _motion_state
+    if MOTION_FILE.exists():
+        try:
+            loaded = _json.loads(MOTION_FILE.read_text())
+            _motion_state = loaded if isinstance(loaded, dict) else {}
+        except Exception as e:
+            print(f"Failed to load motion.json: {e}")
+            _motion_state = {}
+    else:
+        _motion_state = {}
+
+
+def _validate_motion_cfg(cfg: dict) -> dict:
+    """Validate and fill in defaults for a motion config entry."""
+    if not isinstance(cfg, dict):
+        raise HTTPException(status_code=400, detail="Motion config must be an object")
+    mode = cfg.get("mode", "sin")
+    if mode not in _ANIM_MODES:
+        raise HTTPException(status_code=400, detail=f"Invalid mode '{mode}'")
+    return {
+        "mode": mode,
+        "base": float(cfg.get("base", 0.0)),
+        "amp": float(cfg.get("amp", 0.0)),
+        "freq": float(cfg.get("freq", 0.0)),
+        "phase": float(cfg.get("phase", 0.0)),
+    }
+
+
+_load_motion()
+
+
+@app.get("/motion")
+async def get_motion():
+    """Return the current motion state for all animated properties."""
+    with _motion_lock:
+        return dict(_motion_state)
+
+
+@app.patch("/motion")
+async def patch_motion(updates: dict):
+    """Partial update: set or clear motion for one or more properties.
+
+    Body: { "<prop>": <config> | null, ... } — null clears that property.
+    Valid props: pan_x, pan_y, displacement, transmission, ior, emissive,
+    roughness, metalness.
+    """
+    with _motion_lock:
+        for prop, cfg in updates.items():
+            if prop not in _ANIMATED_PROPS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown animated property '{prop}'. Valid: {sorted(_ANIMATED_PROPS)}",
+                )
+            if cfg is None:
+                _motion_state.pop(prop, None)
+            else:
+                _motion_state[prop] = _validate_motion_cfg(cfg)
+        _save_motion()
+        return dict(_motion_state)
+
+
+@app.delete("/motion")
+async def clear_motion():
+    """Remove all motion configs."""
+    with _motion_lock:
+        _motion_state.clear()
+        _save_motion()
+        return {"ok": True}
+
 
 # Serve frontend — must be after all API routes
 UI_DIR = PROJECT_ROOT / "ui" / "dist"

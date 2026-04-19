@@ -3,9 +3,13 @@ import MaterialPreview from './components/MaterialPreview'
 import LayerStack from './components/LayerStack'
 import { materialPresets, promptModifiers } from './data/materialPresets'
 import { useLayerStack } from './hooks/useLayerStack'
+import { useMotion } from './hooks/useMotion'
+import { ANIMATED_PROPS, PROP_LABELS, defaultMotion } from './types/motion'
+import type { AnimMode } from './types/motion'
 import { compositePbrLayers } from './lib/compositor'
 import type { PbrMaps } from './types/layers'
 import MapPainter from './components/MapPainter'
+import type { MapPainterHandle } from './components/MapPainter'
 import './App.css'
 
 const API_URL = ''
@@ -58,6 +62,10 @@ function App() {
 
   // Paint
   const [paintChannels, setPaintChannels] = useState<('basecolor' | 'normal' | 'roughness' | 'metalness' | 'height' | 'ao' | 'emissive' | 'translucency' | 'subsurface')[]>(['metalness'])
+  const [spherePaint, setSpherePaint] = useState(true)
+  const painterRef = useRef<MapPainterHandle>(null)
+  const paintCanvasMapRef = useRef<Map<string, HTMLCanvasElement> | null>(null)
+  const paintVersionRef = useRef(0)
   const [paintingLayerId, setPaintingLayerId] = useState<string | null>(null)
 
   // Library
@@ -75,6 +83,7 @@ function App() {
 
   // Translucency & SSS
   const [transmission, setTransmission] = useState(0.0)
+  const [ior, setIor] = useState(1.5)
   const [thickness, setThickness] = useState(0.0)
   const [subsurfaceColor, setSubsurfaceColor] = useState('#ffffff')
   const [translucencyMapUrl, setTranslucencyMapUrl] = useState<string | null>(null)
@@ -172,6 +181,8 @@ function App() {
 
   // Layer stack
   const { layers, addLayer, removeLayer, updateLayer, moveLayer, duplicateLayer, clearLayers } = useLayerStack()
+  // Motion / animation
+  const { motion, setProp: setMotionProp, updateProp: updateMotionProp, clearAll: clearAllMotion } = useMotion()
   const [compositedMaps, setCompositedMaps] = useState<{
     basecolor: string | null; normal: string | null; roughness: string | null;
     metalness: string | null; height: string | null;
@@ -558,7 +569,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (mode === 'library') loadLibrary()
+    if (mode === 'library' || mode === 'layers') loadLibrary()
   }, [mode, loadLibrary])
 
   const handleSaveMaterial = async () => {
@@ -599,6 +610,29 @@ function App() {
     }
   }
 
+  const handleLoadMaterialToLayer = async (layerId: string, materialId: string) => {
+    try {
+      const res = await fetch(`${API_URL}/library/${materialId}`)
+      if (res.ok) {
+        const data = await res.json()
+        const maps: Record<string, string> = {}
+        if (data.texture_url) maps.basecolor = `${API_URL}${data.texture_url}`
+        if (data.normal_map_url) maps.normal = `${API_URL}${data.normal_map_url}`
+        if (data.roughness_map_url) maps.roughness = `${API_URL}${data.roughness_map_url}`
+        if (data.metallic_map_url) maps.metalness = `${API_URL}${data.metallic_map_url}`
+        if (data.height_map_url) maps.height = `${API_URL}${data.height_map_url}`
+        if (data.emissive_map_url) maps.emissive = `${API_URL}${data.emissive_map_url}`
+        updateLayer(layerId, {
+          materialMaps: maps,
+          materialPrompt: data.prompt || '',
+          name: data.name || undefined,
+        })
+      }
+    } catch (e) {
+      console.error('Load to layer failed:', e)
+    }
+  }
+
   const handleDeleteMaterial = async (id: string) => {
     try {
       await fetch(`${API_URL}/library/${id}`, { method: 'DELETE' })
@@ -607,6 +641,26 @@ function App() {
       console.error('Delete failed:', e)
     }
   }
+
+  // --- Sphere paint handlers ---
+  const isPaintActive = (mode === 'paint' || (mode === 'layers' && paintingLayerId !== null)) && spherePaint
+
+  const handleSpherePaintDown = useCallback((x: number, y: number) => {
+    paintCanvasMapRef.current = painterRef.current?.getCanvasMap() ?? null
+    painterRef.current?.startStroke()
+    painterRef.current?.paintAt(x, y)
+    paintVersionRef.current++
+  }, [])
+
+  const handleSpherePaintMove = useCallback((x: number, y: number) => {
+    painterRef.current?.paintAt(x, y)
+    paintVersionRef.current++
+  }, [])
+
+  const handleSpherePaintUp = useCallback(() => {
+    painterRef.current?.endStroke()
+    paintCanvasMapRef.current = null
+  }, [])
 
   return (
     <div className="app">
@@ -809,6 +863,8 @@ function App() {
                 onDuplicateLayer={duplicateLayer}
                 onGenerateLayer={handleGenerateLayer}
                 onPaintLayer={(id) => setPaintingLayerId(paintingLayerId === id ? null : id)}
+                onLoadFromLibrary={handleLoadMaterialToLayer}
+                libraryItems={libraryItems}
                 paintingLayerId={paintingLayerId}
                 onApply={handleApplyLayers}
                 applying={applyingLayers}
@@ -817,8 +873,14 @@ function App() {
                 <>
                   <section className="section">
                     <h2>Paint: {paintingLayer.name}</h2>
+                    <label style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                      <input type="checkbox" checked={spherePaint} onChange={(e) => setSpherePaint(e.target.checked)} />
+                      Paint on sphere
+                    </label>
                   </section>
                   <MapPainter
+                    ref={painterRef}
+                    hideCanvas={spherePaint}
                     channels={paintChannels}
                     sourceUrls={paintingLayer.materialMaps as Record<string, string | null>}
                     onChannelsChange={setPaintChannels}
@@ -835,8 +897,14 @@ function App() {
             <>
               <section className="section">
                 <h2>Paint Base Maps</h2>
+                <label style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                  <input type="checkbox" checked={spherePaint} onChange={(e) => setSpherePaint(e.target.checked)} />
+                  Paint on sphere
+                </label>
               </section>
               <MapPainter
+                ref={painterRef}
+                hideCanvas={spherePaint}
                 channels={paintChannels}
                 sourceUrls={{
                   basecolor: textureUrl, normal: normalMapUrl, roughness: roughnessMapUrl,
@@ -1048,6 +1116,14 @@ function App() {
               invertRoughness={invertRoughness}
               geometry={geometry}
               customMeshUrl={customMeshUrl}
+              ior={ior}
+              motion={motion}
+              paintMode={isPaintActive}
+              onPaintDown={handleSpherePaintDown}
+              onPaintMove={handleSpherePaintMove}
+              onPaintUp={handleSpherePaintUp}
+              paintCanvases={paintCanvasMapRef}
+              paintVersionRef={paintVersionRef}
             />
           </Suspense>
           {viewingMap && (
@@ -1209,11 +1285,18 @@ function App() {
                 Enable Translucency
               </label>
               {transmission > 0 && (
-                <label>
-                  Transmission: {transmission.toFixed(2)}
-                  <input type="range" min="0.01" max="1" step="0.01" value={transmission}
-                    onChange={(e) => setTransmission(parseFloat(e.target.value))} />
-                </label>
+                <>
+                  <label>
+                    Transmission: {transmission.toFixed(2)}
+                    <input type="range" min="0.01" max="1" step="0.01" value={transmission}
+                      onChange={(e) => setTransmission(parseFloat(e.target.value))} />
+                  </label>
+                  <label>
+                    IOR: {ior.toFixed(2)}
+                    <input type="range" min="1.0" max="2.5" step="0.01" value={ior}
+                      onChange={(e) => setIor(parseFloat(e.target.value))} />
+                  </label>
+                </>
               )}
               <label>
                 <input type="checkbox" checked={thickness > 0}
@@ -1259,6 +1342,83 @@ function App() {
                 <input type="checkbox" checked={heightInvert} onChange={(e) => setHeightInvert(e.target.checked)} />
                 Invert height
               </label>
+            </div>
+          </details>
+
+          <details className="section-collapse">
+            <summary>Motion</summary>
+            <div className="section-body">
+              <button
+                className="preset-btn"
+                onClick={clearAllMotion}
+                disabled={Object.keys(motion).length === 0}
+                style={{ width: '100%', marginBottom: '0.5rem' }}
+              >
+                Clear all motion
+              </button>
+              {ANIMATED_PROPS.map(prop => {
+                const cfg = motion[prop]
+                const active = !!cfg && cfg.mode !== 'static'
+                return (
+                  <div key={prop} style={{ borderTop: '1px solid #333', paddingTop: '0.4rem', marginTop: '0.4rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.78rem' }}>
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={(e) => setMotionProp(prop, e.target.checked ? defaultMotion(prop) : null)}
+                      />
+                      <strong style={{ flex: 1 }}>{PROP_LABELS[prop]}</strong>
+                      {cfg && (
+                        <select
+                          value={cfg.mode}
+                          onChange={(e) => updateMotionProp(prop, { mode: e.target.value as AnimMode })}
+                          style={{ fontSize: '0.7rem' }}
+                        >
+                          <option value="static">static</option>
+                          <option value="sin">sin</option>
+                          <option value="cos">cos</option>
+                          <option value="linear">linear</option>
+                        </select>
+                      )}
+                    </div>
+                    {active && cfg && (
+                      <div style={{ paddingLeft: '1.4rem', paddingTop: '0.3rem' }}>
+                        <label style={{ fontSize: '0.72rem' }}>
+                          Base: {cfg.base.toFixed(3)}
+                          <input type="range" min={-2} max={2} step={0.01} value={cfg.base}
+                            onChange={(e) => updateMotionProp(prop, { base: parseFloat(e.target.value) })} />
+                        </label>
+                        {(cfg.mode === 'sin' || cfg.mode === 'cos') && (
+                          <>
+                            <label style={{ fontSize: '0.72rem' }}>
+                              Amp: {cfg.amp.toFixed(3)}
+                              <input type="range" min={0} max={2} step={0.01} value={cfg.amp}
+                                onChange={(e) => updateMotionProp(prop, { amp: parseFloat(e.target.value) })} />
+                            </label>
+                            <label style={{ fontSize: '0.72rem' }}>
+                              Freq (Hz): {cfg.freq.toFixed(3)}
+                              <input type="range" min={0} max={5} step={0.01} value={cfg.freq}
+                                onChange={(e) => updateMotionProp(prop, { freq: parseFloat(e.target.value) })} />
+                            </label>
+                            <label style={{ fontSize: '0.72rem' }}>
+                              Phase: {cfg.phase.toFixed(2)}
+                              <input type="range" min={0} max={Math.PI * 2} step={0.05} value={cfg.phase}
+                                onChange={(e) => updateMotionProp(prop, { phase: parseFloat(e.target.value) })} />
+                            </label>
+                          </>
+                        )}
+                        {cfg.mode === 'linear' && (
+                          <label style={{ fontSize: '0.72rem' }}>
+                            Rate/sec: {cfg.freq.toFixed(3)}
+                            <input type="range" min={-1} max={1} step={0.005} value={cfg.freq}
+                              onChange={(e) => updateMotionProp(prop, { freq: parseFloat(e.target.value) })} />
+                          </label>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </details>
 

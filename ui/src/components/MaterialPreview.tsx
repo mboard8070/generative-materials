@@ -1,9 +1,11 @@
-import { useRef, useEffect, useState, useMemo, Suspense } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
+import { useRef, useEffect, useState, useMemo, useCallback, Suspense } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Environment, useTexture } from '@react-three/drei'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
+import { evaluateMotion } from '../types/motion'
+import type { MotionState } from '../types/motion'
 
 /**
  * Safely load an optional texture via THREE.TextureLoader.
@@ -155,6 +157,31 @@ function useInvertedTexture(
   return result
 }
 
+/**
+ * Create a CanvasTexture from a paint canvas for real-time sphere painting.
+ * Returns null when no canvas is provided, falling back to URL-loaded textures.
+ */
+function usePaintCanvasTexture(
+  canvas: HTMLCanvasElement | null | undefined,
+  tileRepeat: number,
+): THREE.CanvasTexture | null {
+  const [tex, setTex] = useState<THREE.CanvasTexture | null>(null)
+
+  useEffect(() => {
+    if (!canvas) {
+      setTex(prev => { prev?.dispose(); return null })
+      return
+    }
+    const t = new THREE.CanvasTexture(canvas)
+    t.wrapS = t.wrapT = THREE.RepeatWrapping
+    t.repeat.set(tileRepeat, tileRepeat)
+    setTex(prev => { prev?.dispose(); return t })
+    return () => { t.dispose() }
+  }, [canvas, tileRepeat])
+
+  return tex
+}
+
 function useCustomGeometry(url: string | null): THREE.BufferGeometry | null {
   const [geo, setGeo] = useState<THREE.BufferGeometry | null>(null)
   useEffect(() => {
@@ -206,6 +233,8 @@ interface MaterialSphereProps {
   ignoreMetallicMap: boolean
   ignoreRoughnessMap: boolean
   invertRoughness: boolean
+  ior?: number
+  motion?: MotionState
 }
 
 function TexturedSphere({
@@ -236,10 +265,22 @@ function TexturedSphere({
   ignoreMetallicMap = false,
   ignoreRoughnessMap = false,
   invertRoughness = false,
+  ior = 1.5,
+  motion,
   geometry = 'sphere',
   customMeshUrl = null,
-}: MaterialSphereProps & { geometry?: string; customMeshUrl?: string | null }) {
-  const meshRef = useRef<THREE.Mesh>(null)
+  meshRef: externalMeshRef,
+  paintCanvases,
+  paintVersionRef,
+}: MaterialSphereProps & {
+  geometry?: string
+  customMeshUrl?: string | null
+  meshRef?: React.RefObject<THREE.Mesh | null>
+  paintCanvases?: React.RefObject<Map<string, HTMLCanvasElement> | null>
+  paintVersionRef?: React.RefObject<number>
+}) {
+  const internalMeshRef = useRef<THREE.Mesh>(null)
+  const meshRef = externalMeshRef || internalMeshRef
   const customGeometry = useCustomGeometry(geometry === 'custom' ? customMeshUrl : null)
 
   // AO requires uv2 — copy uv to uv2 whenever geometry changes
@@ -273,36 +314,97 @@ function TexturedSphere({
   // Apply channel flips to the normal map
   const normalMap = useFlippedNormalMap(rawNormalMap, normalFlipR, normalFlipG, normalFlipB)
 
+  // Live paint canvas textures (null when not painting)
+  const canvasMap = paintCanvases?.current
+  const paintAlbedo = usePaintCanvasTexture(canvasMap?.get('basecolor'), tileRepeat)
+  const paintNormal = usePaintCanvasTexture(canvasMap?.get('normal'), tileRepeat)
+  const paintRoughness = usePaintCanvasTexture(canvasMap?.get('roughness'), tileRepeat)
+  const paintMetallic = usePaintCanvasTexture(canvasMap?.get('metalness'), tileRepeat)
+  const paintHeight = usePaintCanvasTexture(canvasMap?.get('height'), tileRepeat)
+  const paintAo = usePaintCanvasTexture(canvasMap?.get('ao'), tileRepeat)
+  const paintEmissive = usePaintCanvasTexture(canvasMap?.get('emissive'), tileRepeat)
+
+  const lastPaintVersion = useRef(0)
+  const materialRef = useRef<THREE.MeshPhysicalMaterial>(null)
+  const timeRef = useRef(0)
+
   useFrame((_, delta) => {
     if (meshRef.current && autoRotate) {
       meshRef.current.rotation.y += delta * 0.3
     }
+    // Live paint: mark canvas textures dirty when paint version changes
+    if (paintVersionRef && paintVersionRef.current !== lastPaintVersion.current) {
+      lastPaintVersion.current = paintVersionRef.current
+      const textures = [paintAlbedo, paintNormal, paintRoughness, paintMetallic, paintHeight, paintAo, paintEmissive]
+      for (const t of textures) {
+        if (t) t.needsUpdate = true
+      }
+    }
+
+    // Motion / animation — always write authoritative values each frame so
+    // clearing a motion config reverts to the static UI value instead of
+    // leaving the last animated value stuck on the material.
+    timeRef.current += delta
+    const t = timeRef.current
+    const mat = materialRef.current
+    const m = motion ?? {}
+
+    const px = evaluateMotion(m.pan_x, t, 0)
+    const py = evaluateMotion(m.pan_y, t, 0)
+    const allTex = [
+      finalAlbedo, finalNormalMap, finalRoughnessMap, finalMetallicMap,
+      finalDisplacementMap, finalAoMap, finalEmissiveMap,
+      translucencyMap, subsurfaceMap,
+    ]
+    for (const tex of allTex) {
+      if (tex) tex.offset.set(px, py)
+    }
+
+    if (mat) {
+      mat.displacementScale = evaluateMotion(m.displacement, t, displacementScale)
+      mat.displacementBias = -mat.displacementScale * 0.5
+      mat.transmission = evaluateMotion(m.transmission, t, transmission)
+      mat.ior = evaluateMotion(m.ior, t, ior)
+      mat.emissiveIntensity = evaluateMotion(m.emissive, t, emissiveIntensity)
+      mat.roughness = evaluateMotion(m.roughness, t, roughness)
+      mat.metalness = evaluateMotion(m.metalness, t, metalness)
+    }
   })
 
+  // Use paint canvas textures when available, fall back to URL-loaded
+  const finalAlbedo = paintAlbedo || albedo
+  const finalNormalMap = paintNormal || normalMap
+  const finalRoughnessMap = paintRoughness || roughnessMap
+  const finalMetallicMap = paintMetallic || metallicMap
+  const finalDisplacementMap = paintHeight || displacementMap
+  const finalAoMap = paintAo || aoMap
+  const finalEmissiveMap = paintEmissive || emissiveMap
+
   // Force material shader recompile when the set of available maps changes
-  const materialKey = `mat-${!!normalMap}-${!!displacementMap}-${!!roughnessMap}-${!!emissiveMap}-${!!aoMap}-${!!metallicMap}-${!!translucencyMap}-${!!subsurfaceMap}-${tileRepeat}-${ignoreMetallicMap}-${ignoreRoughnessMap}-${invertRoughness}-${metallicMapUrl?.substring(0, 30) ?? 'none'}`
+  const materialKey = `mat-${!!finalNormalMap}-${!!finalDisplacementMap}-${!!finalRoughnessMap}-${!!finalEmissiveMap}-${!!finalAoMap}-${!!finalMetallicMap}-${!!translucencyMap}-${!!subsurfaceMap}-${tileRepeat}-${ignoreMetallicMap}-${ignoreRoughnessMap}-${invertRoughness}-${metallicMapUrl?.substring(0, 30) ?? 'none'}-${!!paintAlbedo}`
 
   const normalScaleVec = useMemo(() => new THREE.Vector2(normalScale, normalScale), [normalScale])
   const attenuationColor = useMemo(() => new THREE.Color(subsurfaceColor), [subsurfaceColor])
 
   const mat = (
     <meshPhysicalMaterial
+      ref={materialRef}
       key={materialKey}
-      map={albedo}
-      normalMap={normalMap ?? undefined}
+      map={finalAlbedo}
+      normalMap={finalNormalMap ?? undefined}
       normalScale={normalScaleVec}
-      displacementMap={displacementMap ?? undefined}
+      displacementMap={finalDisplacementMap ?? undefined}
       displacementScale={displacementScale}
       displacementBias={-displacementScale * 0.5}
-      roughnessMap={ignoreRoughnessMap ? undefined : (roughnessMap ?? undefined)}
+      roughnessMap={ignoreRoughnessMap ? undefined : (finalRoughnessMap ?? undefined)}
       roughness={roughness}
       metalness={metalness}
-      metalnessMap={ignoreMetallicMap ? undefined : (metallicMap ?? undefined)}
+      metalnessMap={ignoreMetallicMap ? undefined : (finalMetallicMap ?? undefined)}
       specularIntensity={specularIntensity}
       specularColor={new THREE.Color(1, 1, 1)}
-      aoMap={aoMap ?? undefined}
+      aoMap={finalAoMap ?? undefined}
       aoMapIntensity={aoIntensity}
-      emissiveMap={emissiveMap ?? undefined}
+      emissiveMap={finalEmissiveMap ?? undefined}
       emissive={new THREE.Color(1, 1, 1)}
       emissiveIntensity={emissiveIntensity}
       transmission={transmission}
@@ -311,7 +413,7 @@ function TexturedSphere({
       thicknessMap={subsurfaceMap ?? undefined}
       attenuationColor={attenuationColor}
       attenuationDistance={thickness > 0 ? 2.0 : 0}
-      ior={1.5}
+      ior={ior}
     />
   )
 
@@ -349,7 +451,7 @@ function PlaceholderMesh({ roughness, metalness, autoRotate, geometry }: {
   )
 }
 
-function MaterialSphere(props: MaterialSphereProps & { geometry: string; customMeshUrl: string | null }) {
+function MaterialSphere(props: MaterialSphereProps & { geometry: string; customMeshUrl: string | null; meshRef?: React.RefObject<THREE.Mesh | null>; paintCanvases?: React.RefObject<Map<string, HTMLCanvasElement> | null>; paintVersionRef?: React.RefObject<number> }) {
   if (!props.textureUrl) {
     return <PlaceholderMesh roughness={props.roughness} metalness={props.metalness} autoRotate={props.autoRotate} geometry={props.geometry} />
   }
@@ -361,6 +463,86 @@ function MaterialSphere(props: MaterialSphereProps & { geometry: string; customM
   )
 }
 
+// --- Paint handler: raycasts pointer events onto the sphere to get UV coordinates ---
+
+function PaintHandler({
+  meshRef,
+  enabled,
+  tileRepeat,
+  onDown,
+  onMove,
+  onUp,
+}: {
+  meshRef: React.RefObject<THREE.Mesh | null>
+  enabled: boolean
+  tileRepeat: number
+  onDown?: (x: number, y: number) => void
+  onMove?: (x: number, y: number) => void
+  onUp?: () => void
+}) {
+  const { gl, camera } = useThree()
+  const raycasterRef = useRef(new THREE.Raycaster())
+  const mouseRef = useRef(new THREE.Vector2())
+  const paintingRef = useRef(false)
+
+  const getPixelFromEvent = useCallback((e: PointerEvent): { x: number; y: number } | null => {
+    const rect = gl.domElement.getBoundingClientRect()
+    mouseRef.current.set(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    )
+    raycasterRef.current.setFromCamera(mouseRef.current, camera)
+    const mesh = meshRef.current
+    if (!mesh) return null
+    const intersects = raycasterRef.current.intersectObject(mesh)
+    if (intersects.length > 0 && intersects[0].uv) {
+      const uv = intersects[0].uv
+      const x = ((uv.x * tileRepeat) % 1) * 512
+      const y = (1 - ((uv.y * tileRepeat) % 1)) * 512
+      return { x, y }
+    }
+    return null
+  }, [gl, camera, meshRef, tileRepeat])
+
+  useEffect(() => {
+    if (!enabled) return
+    const el = gl.domElement
+
+    const handleDown = (e: PointerEvent) => {
+      const pos = getPixelFromEvent(e)
+      if (pos) {
+        paintingRef.current = true
+        onDown?.(pos.x, pos.y)
+      }
+    }
+
+    const handleMove = (e: PointerEvent) => {
+      if (!paintingRef.current) return
+      const pos = getPixelFromEvent(e)
+      if (pos) onMove?.(pos.x, pos.y)
+    }
+
+    const handleUp = () => {
+      if (paintingRef.current) {
+        paintingRef.current = false
+        onUp?.()
+      }
+    }
+
+    el.addEventListener('pointerdown', handleDown)
+    window.addEventListener('pointermove', handleMove)
+    window.addEventListener('pointerup', handleUp)
+
+    return () => {
+      el.removeEventListener('pointerdown', handleDown)
+      window.removeEventListener('pointermove', handleMove)
+      window.removeEventListener('pointerup', handleUp)
+    }
+  }, [enabled, gl, getPixelFromEvent, onDown, onMove, onUp])
+
+  return null
+}
+
 interface MaterialPreviewProps extends MaterialSphereProps {
   environment: string
   geometry: string
@@ -370,6 +552,12 @@ interface MaterialPreviewProps extends MaterialSphereProps {
   fillLightIntensity: number
   rimLightIntensity: number
   specularIntensity: number
+  paintMode?: boolean
+  onPaintDown?: (x: number, y: number) => void
+  onPaintMove?: (x: number, y: number) => void
+  onPaintUp?: () => void
+  paintCanvases?: React.RefObject<Map<string, HTMLCanvasElement> | null>
+  paintVersionRef?: React.RefObject<number>
 }
 
 export default function MaterialPreview({
@@ -378,17 +566,39 @@ export default function MaterialPreview({
   keyLightIntensity,
   fillLightIntensity,
   rimLightIntensity,
+  paintMode = false,
+  onPaintDown,
+  onPaintMove,
+  onPaintUp,
+  paintCanvases,
+  paintVersionRef,
   ...sphereProps
 }: MaterialPreviewProps) {
+  const meshRef = useRef<THREE.Mesh>(null)
+
   return (
-    <div className="preview-container" style={{ width: '100%', height: '100%', background: '#1a1a1a', borderRadius: '8px' }}>
+    <div
+      className="preview-container"
+      style={{
+        width: '100%', height: '100%', background: '#1a1a1a', borderRadius: '8px',
+        cursor: paintMode ? 'crosshair' : undefined,
+      }}
+    >
       <Canvas camera={{ position: [0, 0, 4], fov: 50 }}>
         <ambientLight intensity={0.05} />
         <directionalLight position={[5, 5, 5]} intensity={keyLightIntensity} />
         <directionalLight position={[-3, 2, -2]} intensity={fillLightIntensity} />
         <directionalLight position={[0, -3, 4]} intensity={rimLightIntensity} />
-        <MaterialSphere {...sphereProps} />
-        <OrbitControls enablePan={false} />
+        <MaterialSphere {...sphereProps} meshRef={meshRef} paintCanvases={paintCanvases} paintVersionRef={paintVersionRef} />
+        <OrbitControls enablePan={false} enabled={!paintMode} />
+        <PaintHandler
+          meshRef={meshRef}
+          enabled={paintMode}
+          tileRepeat={sphereProps.tileRepeat}
+          onDown={onPaintDown}
+          onMove={onPaintMove}
+          onUp={onPaintUp}
+        />
         <Suspense fallback={null}>
           <Environment preset={environment as any} background={false} environmentIntensity={envIntensity} />
         </Suspense>

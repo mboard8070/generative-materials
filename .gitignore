@@ -26,6 +26,8 @@ data/processed/
 outputs/
 api/outputs/
 api/library/
+api/layers.json
+api/motion.json
 output/
 
 # Frontend build
