@@ -4,6 +4,20 @@ Generate PBR materials from text descriptions using AI.
 
 > "rusty weathered metal with scratches" → Full PBR material set
 
+## Case Study
+
+**Problem:** Artists and technical artists often need quick PBR material variations for prototyping, but generating usable base color, normal, roughness, metallic, height, and AO maps from a text idea requires multiple tools and a lot of cleanup.
+
+**What I built:** A text-to-material research prototype for the Surfaced project, combining prompt construction, dataset download/preparation scripts, Flux/LoRA training paths, a Python API server, MCP hooks, post-processing utilities, and a web UI for material generation experiments.
+
+**Architecture:** The repo separates generation scripts, dataset preparation, LoRA training configs, tile post-processing, an API layer, MCP server integration, and a Vite UI. The intended workflow is prompt -> generated material maps -> tiling/post-processing -> preview/export.
+
+**Technical depth:** The project includes Poly Haven and AmbientCG dataset downloaders, dataset preparation scripts, Flux LoRA training configs, tiling post-process utilities, Gradio/Python entry points, and a React/Vite frontend.
+
+**Proof:** The repo documents the material-map targets, training approach, dataset sources, planned phases, and command-line prototype entry point.
+
+**Tradeoffs:** This is an experimental material-generation repo rather than a polished commercial app. The README keeps the roadmap visible so users can distinguish implemented pipeline pieces from planned output polish.
+
 ## Features (Planned)
 
 - **Text-to-PBR** — Generate complete material sets:
